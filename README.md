@@ -41,7 +41,7 @@ npm run dev    # http://localhost:5173 → /api 프록시 → http://localhost:3
 | `/frontend-verify` | 프론트엔드 typecheck + lint + build |
 | `/fullstack-verify` | 백엔드 + 프론트엔드 전체 검증 |
 | `/runtime-test` | 백엔드 런타임 통합 테스트 (API 호출 기반) |
-| `/manual-test` | 수동 UI 테스트 루프 — 6개 도메인 시나리오를 Playwright로 검증 |
+| `/manual-test` | 수동 UI 테스트 루프 — 6개 도메인 시나리오를 Playwright로 검증 -> 자동화 필요 |
 
 ## Claude 스킬 (Skills)
 
