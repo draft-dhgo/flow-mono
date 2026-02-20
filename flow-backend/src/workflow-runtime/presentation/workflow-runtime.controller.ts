@@ -177,6 +177,7 @@ export class WorkflowRuntimeController {
       pauseAfter: dto.pauseAfter,
       gitRefConfigs: dto.gitRefConfigs?.map((g) => GitRefNodeConfig.create(GitId.create(g.gitId), g.baseBranch)),
       mcpServerRefConfigs: dto.mcpServerRefConfigs?.map((m) => McpServerRefNodeConfig.create(McpServerId.create(m.mcpServerId), m.envOverrides)),
+      reportFileRefs: dto.reportFileRefs,
     });
   }
 
@@ -194,6 +195,7 @@ export class WorkflowRuntimeController {
       pauseAfter: dto.pauseAfter,
       gitRefConfigs: dto.gitRefConfigs?.map((g) => GitRefNodeConfig.create(GitId.create(g.gitId), g.baseBranch)),
       mcpServerRefConfigs: dto.mcpServerRefConfigs?.map((m) => McpServerRefNodeConfig.create(McpServerId.create(m.mcpServerId), m.envOverrides)),
+      reportFileRefs: dto.reportFileRefs,
     });
   }
 

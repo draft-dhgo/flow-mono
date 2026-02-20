@@ -23,6 +23,7 @@ export interface WorkflowWorkDefinitionReadModel {
   readonly order: number;
   readonly model: string;
   readonly pauseAfter: boolean;
+  readonly reportFileRefs: number[];
   readonly taskDefinitions: WorkflowTaskDefinitionReadModel[];
   readonly gitRefs: WorkflowGitRefReadModel[];
   readonly mcpServerRefs: WorkflowMcpServerRefReadModel[];

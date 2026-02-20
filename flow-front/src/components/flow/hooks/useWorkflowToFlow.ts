@@ -14,6 +14,7 @@ interface WorkDefinitionLike {
   order: number;
   model: string;
   pauseAfter?: boolean;
+  reportFileRefs?: number[];
   taskDefinitions: { order: number; query: string; reportOutline?: { sections: { title: string; description: string }[] } | null }[];
 }
 
@@ -104,6 +105,7 @@ export function useWorkflowToFlow(
           model: work.model,
           taskCount: work.taskDefinitions.length,
           pauseAfter: work.pauseAfter ?? false,
+          reportFileRefCount: work.reportFileRefs?.length ?? 0,
           isEditable: mode === 'edit',
           onTogglePauseAfter,
           onDeleteWork: mode === 'edit' ? onDeleteWork : undefined,
@@ -188,6 +190,20 @@ export function useWorkflowToFlow(
         type: 'sequence',
       });
       prevSpineId = addBtnId;
+    }
+
+    // Report ref edges (dashed purple curves between work nodes)
+    for (let wi = 0; wi < workDefs.length; wi++) {
+      const refs = workDefs[wi].reportFileRefs ?? [];
+      for (const sourceIdx of refs) {
+        edges.push({
+          id: `reportRef-${sourceIdx}->${wi}`,
+          source: `work-${sourceIdx}`,
+          target: `work-${wi}`,
+          sourceHandle: 'spine',
+          type: 'reportRef',
+        });
+      }
     }
 
     // End node

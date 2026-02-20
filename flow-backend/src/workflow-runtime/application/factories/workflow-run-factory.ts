@@ -35,6 +35,7 @@ export class WorkflowRunFactory {
           McpServerRefNodeConfig.create(mr.mcpServerId, mr.envOverrides),
         ),
         pauseAfter: wd.pauseAfter,
+        reportFileRefs: [...(wd.reportFileRefs ?? [])],
       });
     });
 

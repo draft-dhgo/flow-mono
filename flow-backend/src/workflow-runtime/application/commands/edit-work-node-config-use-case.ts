@@ -26,6 +26,7 @@ export interface EditWorkNodeConfigCommand {
   readonly gitRefConfigs?: GitRefNodeConfig[];
   readonly mcpServerRefConfigs?: McpServerRefNodeConfig[];
   readonly pauseAfter?: boolean;
+  readonly reportFileRefs?: number[];
 }
 
 @Injectable()
@@ -52,6 +53,7 @@ export class EditWorkNodeConfigUseCase {
     if (command.gitRefConfigs !== undefined) updated = updated.withGitRefConfigs(command.gitRefConfigs);
     if (command.mcpServerRefConfigs !== undefined) updated = updated.withMcpServerRefConfigs(command.mcpServerRefConfigs);
     if (command.pauseAfter !== undefined) updated = updated.withPauseAfter(command.pauseAfter);
+    if (command.reportFileRefs !== undefined) updated = updated.withReportFileRefs(command.reportFileRefs);
 
     run.updateWorkNodeConfig(command.sequence, updated);
 

@@ -21,6 +21,7 @@ import { TaskNode } from './nodes/TaskNode';
 import { PauseIndicatorNode } from './nodes/PauseIndicatorNode';
 import { AddButtonNode } from './nodes/AddButtonNode';
 import { SequenceEdge } from './edges/SequenceEdge';
+import { ReportRefEdge } from './edges/ReportRefEdge';
 import { useEffect } from 'react';
 
 const nodeTypes = {
@@ -34,6 +35,7 @@ const nodeTypes = {
 
 const edgeTypes = {
   sequence: SequenceEdge,
+  reportRef: ReportRefEdge,
 };
 
 interface FlowCanvasProps {

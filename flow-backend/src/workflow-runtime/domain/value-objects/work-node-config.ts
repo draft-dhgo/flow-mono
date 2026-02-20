@@ -12,6 +12,7 @@ export interface WorkNodeConfigProps {
   readonly gitRefConfigs: readonly GitRefNodeConfig[];
   readonly mcpServerRefConfigs: readonly McpServerRefNodeConfig[];
   readonly pauseAfter: boolean;
+  readonly reportFileRefs: readonly number[];
 }
 
 export interface CreateWorkNodeConfigProps {
@@ -21,6 +22,7 @@ export interface CreateWorkNodeConfigProps {
   readonly gitRefConfigs?: GitRefNodeConfig[];
   readonly mcpServerRefConfigs?: McpServerRefNodeConfig[];
   readonly pauseAfter?: boolean;
+  readonly reportFileRefs?: number[];
 }
 
 export class WorkNodeConfig {
@@ -31,6 +33,7 @@ export class WorkNodeConfig {
   private readonly _gitRefConfigs: readonly GitRefNodeConfig[];
   private readonly _mcpServerRefConfigs: readonly McpServerRefNodeConfig[];
   private readonly _pauseAfter: boolean;
+  private readonly _reportFileRefs: readonly number[];
 
   private constructor(props: WorkNodeConfigProps) {
     this._id = props.id;
@@ -40,6 +43,7 @@ export class WorkNodeConfig {
     this._gitRefConfigs = Object.freeze([...props.gitRefConfigs]);
     this._mcpServerRefConfigs = Object.freeze([...props.mcpServerRefConfigs]);
     this._pauseAfter = props.pauseAfter;
+    this._reportFileRefs = Object.freeze([...props.reportFileRefs]);
   }
 
   static create(props: CreateWorkNodeConfigProps): WorkNodeConfig {
@@ -60,6 +64,7 @@ export class WorkNodeConfig {
       gitRefConfigs: props.gitRefConfigs ?? [],
       mcpServerRefConfigs: props.mcpServerRefConfigs ?? [],
       pauseAfter: props.pauseAfter ?? false,
+      reportFileRefs: props.reportFileRefs ?? [],
     });
   }
 
@@ -83,6 +88,7 @@ export class WorkNodeConfig {
   get gitRefConfigs(): readonly GitRefNodeConfig[] { return this._gitRefConfigs; }
   get mcpServerRefConfigs(): readonly McpServerRefNodeConfig[] { return this._mcpServerRefConfigs; }
   get pauseAfter(): boolean { return this._pauseAfter; }
+  get reportFileRefs(): readonly number[] { return this._reportFileRefs; }
 
   withModel(model: string): WorkNodeConfig {
     if (!model.trim()) {
@@ -117,6 +123,10 @@ export class WorkNodeConfig {
     return new WorkNodeConfig({ ...this.toProps(), sequence });
   }
 
+  withReportFileRefs(reportFileRefs: number[]): WorkNodeConfig {
+    return new WorkNodeConfig({ ...this.toProps(), reportFileRefs });
+  }
+
   private toProps(): WorkNodeConfigProps {
     return {
       id: this._id,
@@ -126,6 +136,7 @@ export class WorkNodeConfig {
       gitRefConfigs: this._gitRefConfigs,
       mcpServerRefConfigs: this._mcpServerRefConfigs,
       pauseAfter: this._pauseAfter,
+      reportFileRefs: this._reportFileRefs,
     };
   }
 }

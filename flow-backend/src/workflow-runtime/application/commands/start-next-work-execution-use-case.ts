@@ -153,6 +153,34 @@ export class StartNextWorkExecutionUseCase {
       }
     }
 
+    // Report file symlink 생성: 이전 Work의 리포트를 workspace에 심링크
+    const reportFileRefs = currentConfig.reportFileRefs;
+    if (reportFileRefs.length > 0) {
+      const reportsDir = buildPath(workSpacePath, 'reports');
+      await this.fileSystem.createDirectory(reportsDir);
+
+      for (const sourceSequence of reportFileRefs) {
+        const sourceWorkExecutionId = run.workExecutionIds[sourceSequence];
+        if (!sourceWorkExecutionId) continue;
+
+        const reports = await this.reportRepository.findByWorkExecutionId(sourceWorkExecutionId);
+        for (const report of reports) {
+          if (report.status !== 'COMPLETED' || !report.filePath) continue;
+
+          const fileName = report.filePath.split('/').pop() ?? `report-${report.id}`;
+          const sourceDir = buildPath(reportsDir, `work-${sourceSequence}`);
+          await this.fileSystem.createDirectory(sourceDir);
+          const linkPath = buildPath(sourceDir, fileName);
+          await this.fileSystem.createSymlink(report.filePath, linkPath);
+
+          const symLink = SymLink.create(
+            LinkType.SHARED_RESOURCE, sourceWorkExecutionId, report.filePath, linkPath,
+          );
+          workSpace.addLink(symLink);
+        }
+      }
+    }
+
     workflowSpace.addWorkSpace(workSpace);
     await this.workflowSpaceRepository.save(workflowSpace);
 

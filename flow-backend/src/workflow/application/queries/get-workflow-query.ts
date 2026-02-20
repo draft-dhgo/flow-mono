@@ -45,6 +45,7 @@ function serializeWorkflow(workflow: Workflow): WorkflowReadModel {
       order: wd.order,
       model: wd.model as string,
       pauseAfter: wd.pauseAfter,
+      reportFileRefs: [...wd.reportFileRefs],
       taskDefinitions: wd.taskDefinitions.map((td) => ({
         order: td.order,
         query: td.query,

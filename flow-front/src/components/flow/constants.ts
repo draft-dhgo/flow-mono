@@ -76,6 +76,8 @@ export const EDGE_STATUS_COLORS: Record<NodeStatus, string> = {
   cancelled: '#f87171',
 };
 
+export const REPORT_REF_EDGE_COLOR = '#a78bfa';
+
 // ─── Status labels ───
 
 export const NODE_STATUS_LABELS: Record<NodeStatus, string> = {

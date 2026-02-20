@@ -11,6 +11,7 @@ import {
 import { MODEL_OPTIONS } from '@/lib/constants';
 import { GitRefLinkPanel } from './GitRefLinkPanel';
 import { McpRefLinkPanel } from './McpRefLinkPanel';
+import { ReportRefLinkPanel } from './ReportRefLinkPanel';
 import { Plus, Trash2, ArrowUp, ArrowDown } from 'lucide-react';
 
 interface WorkNodePanelProps {
@@ -21,6 +22,7 @@ interface WorkNodePanelProps {
   mcpServers: { id: string; name: string }[];
   workflowGitRefs: { gitId: string; baseBranch: string }[];
   workflowMcpRefs: { mcpServerId: string; envOverrides?: Record<string, string> }[];
+  workDefinitions: { model: string; taskDefinitions: { order: number; query: string }[] }[];
   onAddTask: () => void;
   onDeleteWork: () => void;
   onMoveUp: () => void;
@@ -36,6 +38,7 @@ export function WorkNodePanel({
   mcpServers,
   workflowGitRefs,
   workflowMcpRefs,
+  workDefinitions,
   onAddTask,
   onDeleteWork,
   onMoveUp,
@@ -104,6 +107,12 @@ export function WorkNodePanel({
         workIndex={workIndex}
         workflowMcpRefs={workflowMcpRefs}
         mcpServers={mcpServers}
+      />
+
+      <ReportRefLinkPanel
+        form={form}
+        workIndex={workIndex}
+        workDefinitions={workDefinitions}
       />
 
       <div className="pt-2">

@@ -62,6 +62,7 @@ const workflowFormSchema = z.object({
         order: z.number().min(0),
         model: z.string().min(1, '모델을 선택하세요'),
         pauseAfter: z.boolean().optional(),
+        reportFileRefs: z.array(z.number()).optional(),
         gitRefs: z
           .array(z.object({ gitId: z.string().min(1), baseBranch: z.string().min(1) }))
           .optional(),
@@ -127,6 +128,7 @@ export function WorkflowFlowEditorPage() {
           order: 0,
           model: '',
           pauseAfter: false,
+          reportFileRefs: [],
           gitRefs: [],
           mcpServerRefs: [],
           taskDefinitions: [{ order: 0, query: '' }],
@@ -156,6 +158,7 @@ export function WorkflowFlowEditorPage() {
           order: w.order,
           model: w.model,
           pauseAfter: w.pauseAfter,
+          reportFileRefs: w.reportFileRefs ?? [],
           gitRefs: w.gitRefs.map((g) => ({ gitId: g.gitId, baseBranch: g.baseBranch })),
           mcpServerRefs: w.mcpServerRefs.map((m) => ({
             mcpServerId: m.mcpServerId,
@@ -257,6 +260,7 @@ export function WorkflowFlowEditorPage() {
         order: insertAt,
         model: '',
         pauseAfter: false,
+        reportFileRefs: [],
         gitRefs: [],
         mcpServerRefs: [],
         taskDefinitions: [{ order: 0, query: '' }],
@@ -408,6 +412,7 @@ export function WorkflowFlowEditorPage() {
                 mcpServers={mcpQuery.data ?? []}
                 workflowGitRefs={form.watch('gitRefs') ?? []}
                 workflowMcpRefs={form.watch('mcpServerRefs') ?? []}
+                workDefinitions={form.watch('workDefinitions') ?? []}
                 onAddTask={() => {
                   const workIndex = selectedPanel.workIndex;
                   const tasks = form.getValues(`workDefinitions.${workIndex}.taskDefinitions`);

@@ -33,6 +33,7 @@ interface SerializedWorkNodeConfig {
   gitRefConfigs: SerializedGitRefNodeConfig[];
   mcpServerRefConfigs: SerializedMcpServerRefNodeConfig[];
   pauseAfter: boolean;
+  reportFileRefs?: number[];
 }
 
 export class WorkflowRunTypeormRepository extends WorkflowRunRepository {
@@ -80,6 +81,7 @@ export class WorkflowRunTypeormRepository extends WorkflowRunRepository {
           McpServerRefNodeConfig.fromProps({ mcpServerId: McpServerId.create(mr.mcpServerId), envOverrides: mr.envOverrides }),
         ),
         pauseAfter: item.pauseAfter,
+        reportFileRefs: item.reportFileRefs ?? [],
       });
     });
   }
@@ -107,6 +109,7 @@ export class WorkflowRunTypeormRepository extends WorkflowRunRepository {
       gitRefConfigs: c.gitRefConfigs.map((gr) => ({ gitId: gr.gitId as string, baseBranch: gr.baseBranch })),
       mcpServerRefConfigs: c.mcpServerRefConfigs.map((mr) => ({ mcpServerId: mr.mcpServerId as string, envOverrides: { ...mr.envOverrides } })),
       pauseAfter: c.pauseAfter,
+      reportFileRefs: [...c.reportFileRefs],
     }));
   }
 

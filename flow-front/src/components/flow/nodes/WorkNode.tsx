@@ -4,7 +4,7 @@ import { cn } from '@/lib/utils';
 import { MODEL_OPTIONS } from '@/lib/constants';
 import { NODE_STATUS_COLORS } from '../constants';
 import type { WorkNode as WorkNodeType } from '../types';
-import { Pause, Layers, Bookmark, GitBranch, Server, Loader2, X } from 'lucide-react';
+import { Pause, Layers, Bookmark, GitBranch, Server, FileText, Loader2, X } from 'lucide-react';
 
 function getModelLabel(model: string): string {
   return MODEL_OPTIONS.find((m) => m.value === model)?.label ?? model;
@@ -93,6 +93,12 @@ export function WorkNode({ data, selected }: NodeProps<WorkNodeType>) {
             <span className="flex items-center gap-0.5">
               <Server className="h-3 w-3" />
               {data.mcpServerRefCount}
+            </span>
+          )}
+          {(data.reportFileRefCount ?? 0) > 0 && (
+            <span className="flex items-center gap-0.5 text-violet-500">
+              <FileText className="h-3 w-3" />
+              {data.reportFileRefCount}
             </span>
           )}
           <span className="flex items-center gap-0.5">

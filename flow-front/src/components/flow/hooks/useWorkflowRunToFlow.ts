@@ -67,6 +67,7 @@ export function useWorkflowRunToFlow(
           pauseAfter: nodeConfig?.pauseAfter ?? false,
           gitRefCount: nodeConfig?.gitRefConfigs?.length ?? 0,
           mcpServerRefCount: nodeConfig?.mcpServerRefConfigs?.length ?? 0,
+          reportFileRefCount: nodeConfig?.reportFileRefs?.length ?? 0,
           status,
           hasCheckpoint,
           isEditable: isNodeEditable,
@@ -140,6 +141,21 @@ export function useWorkflowRunToFlow(
           data: { status },
         });
         prevSpineId = pauseId;
+      }
+    }
+
+    // Report ref edges (dashed purple curves between work nodes)
+    for (let seq = 0; seq < runDetail.totalWorkCount; seq++) {
+      const nodeConfig = configs[seq];
+      const refs = nodeConfig?.reportFileRefs ?? [];
+      for (const sourceSeq of refs) {
+        edges.push({
+          id: `reportRef-${sourceSeq}->${seq}`,
+          source: `work-${sourceSeq}`,
+          target: `work-${seq}`,
+          sourceHandle: 'spine',
+          type: 'reportRef',
+        });
       }
     }
 

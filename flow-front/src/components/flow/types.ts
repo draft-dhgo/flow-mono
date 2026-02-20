@@ -34,6 +34,7 @@ export interface WorkNodeData {
   pauseAfter: boolean;
   gitRefCount?: number;
   mcpServerRefCount?: number;
+  reportFileRefCount?: number;
   status?: NodeStatus;
   hasCheckpoint?: boolean;
   collapsed?: boolean;
@@ -90,7 +91,11 @@ export interface SequenceEdgeData {
   [key: string]: unknown;
 }
 
-export type FlowEdgeType = Edge<SequenceEdgeData>;
+export interface ReportRefEdgeData {
+  [key: string]: unknown;
+}
+
+export type FlowEdgeType = Edge<SequenceEdgeData> | Edge<ReportRefEdgeData>;
 
 // ─── Callbacks ───
 

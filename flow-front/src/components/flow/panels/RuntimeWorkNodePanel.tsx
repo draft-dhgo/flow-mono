@@ -17,7 +17,7 @@ import type {
   GitRefNodeConfigInput,
   McpServerRefNodeConfigInput,
 } from '@/api/types';
-import { Plus, X, Trash2 } from 'lucide-react';
+import { Plus, X, Trash2, FileText } from 'lucide-react';
 
 interface RuntimeWorkNodePanelProps {
   nodeConfig?: WorkNodeConfigSummary;
@@ -32,6 +32,7 @@ interface RuntimeWorkNodePanelProps {
   mode: 'edit' | 'add';
   gitRefPool?: { gitId: string; baseBranch: string }[];
   mcpServerRefPool?: { mcpServerId: string; envOverrides: Record<string, string> }[];
+  allWorkNodeConfigs?: WorkNodeConfigSummary[];
 }
 
 export function RuntimeWorkNodePanel({
@@ -47,6 +48,7 @@ export function RuntimeWorkNodePanel({
   mode,
   gitRefPool = [],
   mcpServerRefPool = [],
+  allWorkNodeConfigs = [],
 }: RuntimeWorkNodePanelProps) {
   const form = useForm({
     defaultValues: {
@@ -57,6 +59,7 @@ export function RuntimeWorkNodePanel({
         : [{ order: 0, query: '' }],
       gitRefConfigs: (nodeConfig?.gitRefConfigs ?? []) as GitRefNodeConfigInput[],
       mcpServerRefConfigs: (nodeConfig?.mcpServerRefConfigs ?? []) as McpServerRefNodeConfigInput[],
+      reportFileRefs: (nodeConfig?.reportFileRefs ?? []) as number[],
     },
   });
 
@@ -70,6 +73,7 @@ export function RuntimeWorkNodePanel({
         pauseAfter: values.pauseAfter,
         gitRefConfigs: values.gitRefConfigs,
         mcpServerRefConfigs: values.mcpServerRefConfigs,
+        reportFileRefs: values.reportFileRefs,
       });
     } else {
       onEdit({
@@ -78,6 +82,7 @@ export function RuntimeWorkNodePanel({
         pauseAfter: values.pauseAfter,
         gitRefConfigs: values.gitRefConfigs,
         mcpServerRefConfigs: values.mcpServerRefConfigs,
+        reportFileRefs: values.reportFileRefs,
       });
     }
   });
@@ -204,6 +209,52 @@ export function RuntimeWorkNodePanel({
               </div>
             </div>
           )}
+
+          {(() => {
+            const availableWorks = allWorkNodeConfigs.filter(
+              (c) => c.sequence < sequence && c.taskCount > 0,
+            );
+            if (availableWorks.length === 0) return null;
+            const currentRefs: number[] = form.watch('reportFileRefs') ?? [];
+            return (
+              <div>
+                <div className="flex items-center gap-1.5 mb-1">
+                  <FileText className="h-3.5 w-3.5 text-muted-foreground" />
+                  <label className="text-sm font-medium">리포트 참조</label>
+                </div>
+                <p className="text-xs text-muted-foreground mb-2">
+                  이전 Work의 리포트를 작업공간에 심링크합니다.
+                </p>
+                <div className="space-y-1.5">
+                  {availableWorks.map((wc) => {
+                    const isLinked = currentRefs.includes(wc.sequence);
+                    return (
+                      <div key={wc.sequence} className="flex items-center gap-2 p-2 rounded border">
+                        <Checkbox
+                          id={`rt-report-ref-${wc.sequence}`}
+                          checked={isLinked}
+                          onCheckedChange={(checked) => {
+                            const refs = form.getValues('reportFileRefs') ?? [];
+                            if (checked) {
+                              form.setValue('reportFileRefs', [...refs, wc.sequence]);
+                            } else {
+                              form.setValue('reportFileRefs', refs.filter((r: number) => r !== wc.sequence));
+                            }
+                          }}
+                        />
+                        <label htmlFor={`rt-report-ref-${wc.sequence}`} className="text-sm">
+                          <span className="font-medium">Work #{wc.sequence + 1}</span>
+                          <span className="text-muted-foreground ml-1.5">
+                            ({wc.model || '모델 미선택'} · {wc.taskCount} tasks)
+                          </span>
+                        </label>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })()}
 
           <div>
             <div className="flex items-center justify-between mb-2">

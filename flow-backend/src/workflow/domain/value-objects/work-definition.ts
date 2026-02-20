@@ -61,6 +61,7 @@ export class WorkDefinition {
   private readonly _mcpServerRefs: readonly McpServerRef[];
   private readonly _taskDefinitions: readonly TaskDefinition[];
   private readonly _pauseAfter: boolean;
+  private readonly _reportFileRefs: readonly number[];
 
   private constructor(
     order: number,
@@ -68,7 +69,8 @@ export class WorkDefinition {
     gitRefs: GitRef[],
     mcpServerRefs: McpServerRef[],
     taskDefinitions: TaskDefinition[],
-    pauseAfter: boolean
+    pauseAfter: boolean,
+    reportFileRefs: number[] = [],
   ) {
     this._order = order;
     this._model = model;
@@ -76,6 +78,7 @@ export class WorkDefinition {
     this._mcpServerRefs = Object.freeze([...mcpServerRefs]);
     this._taskDefinitions = Object.freeze([...taskDefinitions]);
     this._pauseAfter = pauseAfter;
+    this._reportFileRefs = Object.freeze([...reportFileRefs]);
   }
 
   static create(
@@ -84,7 +87,8 @@ export class WorkDefinition {
     taskDefinitions: TaskDefinition[],
     gitRefs?: GitRef[],
     mcpServerRefs?: McpServerRef[],
-    pauseAfter: boolean = false
+    pauseAfter: boolean = false,
+    reportFileRefs: number[] = [],
   ): WorkDefinition {
     if (order < 0) {
       throw new WorkflowInvariantViolationError('Work order must be >= 0');
@@ -92,7 +96,7 @@ export class WorkDefinition {
     if (taskDefinitions.length === 0) {
       throw new WorkflowInvariantViolationError('Work must have at least one task definition');
     }
-    return new WorkDefinition(order, model, gitRefs ?? [], mcpServerRefs ?? [], taskDefinitions, pauseAfter);
+    return new WorkDefinition(order, model, gitRefs ?? [], mcpServerRefs ?? [], taskDefinitions, pauseAfter, reportFileRefs);
   }
 
   static fromProps(
@@ -101,7 +105,8 @@ export class WorkDefinition {
     taskDefinitions: TaskDefinition[],
     gitRefs: GitRef[],
     mcpServerRefs: McpServerRef[],
-    pauseAfter: boolean = false
+    pauseAfter: boolean = false,
+    reportFileRefs: number[] = [],
   ): WorkDefinition {
     if (order < 0) {
       throw new WorkflowInvariantViolationError('Work order must be >= 0');
@@ -109,7 +114,7 @@ export class WorkDefinition {
     if (taskDefinitions.length === 0) {
       throw new WorkflowInvariantViolationError('Work must have at least one task definition');
     }
-    return new WorkDefinition(order, model, gitRefs, mcpServerRefs, taskDefinitions, pauseAfter);
+    return new WorkDefinition(order, model, gitRefs, mcpServerRefs, taskDefinitions, pauseAfter, reportFileRefs);
   }
 
   get order(): number {
@@ -136,11 +141,15 @@ export class WorkDefinition {
     return this._pauseAfter;
   }
 
+  get reportFileRefs(): readonly number[] {
+    return this._reportFileRefs;
+  }
+
   removeGitRef(gitId: GitId): WorkDefinition {
     const filtered = this._gitRefs.filter((ref) => ref.gitId !== gitId);
     return new WorkDefinition(
       this._order, this._model, [...filtered], [...this._mcpServerRefs],
-      [...this._taskDefinitions], this._pauseAfter
+      [...this._taskDefinitions], this._pauseAfter, [...this._reportFileRefs],
     );
   }
 
@@ -148,7 +157,7 @@ export class WorkDefinition {
     const filtered = this._mcpServerRefs.filter((ref) => ref.mcpServerId !== mcpServerId);
     return new WorkDefinition(
       this._order, this._model, [...this._gitRefs], [...filtered],
-      [...this._taskDefinitions], this._pauseAfter
+      [...this._taskDefinitions], this._pauseAfter, [...this._reportFileRefs],
     );
   }
 
@@ -158,7 +167,7 @@ export class WorkDefinition {
     );
     return new WorkDefinition(
       this._order, this._model, [...updatedGitRefs], [...this._mcpServerRefs],
-      [...this._taskDefinitions], this._pauseAfter
+      [...this._taskDefinitions], this._pauseAfter, [...this._reportFileRefs],
     );
   }
 
@@ -168,7 +177,7 @@ export class WorkDefinition {
     );
     return new WorkDefinition(
       this._order, this._model, [...this._gitRefs], [...updatedMcpServerRefs],
-      [...this._taskDefinitions], this._pauseAfter
+      [...this._taskDefinitions], this._pauseAfter, [...this._reportFileRefs],
     );
   }
 }

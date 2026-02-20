@@ -1,5 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsString, IsBoolean, IsArray, IsOptional, ValidateNested } from 'class-validator';
+import { IsString, IsBoolean, IsArray, IsOptional, IsInt, ValidateNested } from 'class-validator';
 import { Type } from 'class-transformer';
 import { TaskNodeConfigDto, GitRefNodeConfigDto, McpServerRefNodeConfigDto } from './edit-work-node-config.dto.js';
 
@@ -32,4 +32,10 @@ export class AddWorkNodeDto {
   @ValidateNested({ each: true })
   @Type(() => McpServerRefNodeConfigDto)
   mcpServerRefConfigs?: McpServerRefNodeConfigDto[];
+
+  @ApiPropertyOptional({ description: 'Indices of previous work nodes whose reports to symlink', type: [Number] })
+  @IsOptional()
+  @IsArray()
+  @IsInt({ each: true })
+  reportFileRefs?: number[];
 }

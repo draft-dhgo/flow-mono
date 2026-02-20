@@ -41,6 +41,7 @@ export class WorkflowConfigReaderImpl extends WorkflowConfigReader {
           order: wd.order,
           model: wd.model,
           pauseAfter: wd.pauseAfter,
+          reportFileRefs: [...wd.reportFileRefs],
           taskDefinitions: wd.taskDefinitions.map(
             (td): TaskDefinitionConfig => ({
               order: td.order,

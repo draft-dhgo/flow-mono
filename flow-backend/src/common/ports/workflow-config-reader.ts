@@ -22,6 +22,7 @@ export interface WorkDefinitionConfig {
   readonly order: number;
   readonly model: string;
   readonly pauseAfter: boolean;
+  readonly reportFileRefs: readonly number[];
   readonly taskDefinitions: ReadonlyArray<TaskDefinitionConfig>;
   readonly mcpServerRefs: ReadonlyArray<McpServerRefConfig>;
   readonly gitRefs: ReadonlyArray<GitRefConfig>;

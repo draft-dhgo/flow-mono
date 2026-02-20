@@ -261,6 +261,7 @@ export function WorkflowRunFlowPage() {
                 mode="edit"
                 gitRefPool={runDetail.gitRefPool}
                 mcpServerRefPool={runDetail.mcpServerRefPool}
+                allWorkNodeConfigs={runDetail.workNodeConfigs}
               />
             )}
             {selectedPanel.type === 'addWork' && (
@@ -280,6 +281,7 @@ export function WorkflowRunFlowPage() {
                 mode="add"
                 gitRefPool={runDetail.gitRefPool}
                 mcpServerRefPool={runDetail.mcpServerRefPool}
+                allWorkNodeConfigs={runDetail.workNodeConfigs}
               />
             )}
             {selectedPanel.type === 'checkpoints' && checkpoints && (

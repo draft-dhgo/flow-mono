@@ -98,6 +98,12 @@ export class WorkDefinitionDto {
   @IsOptional()
   @IsBoolean()
   pauseAfter?: boolean;
+
+  @ApiPropertyOptional({ description: 'Indices of previous work nodes whose reports to symlink', type: [Number] })
+  @IsOptional()
+  @IsArray()
+  @IsNumber({}, { each: true })
+  reportFileRefs?: number[];
 }
 
 export class CreateWorkflowDto {

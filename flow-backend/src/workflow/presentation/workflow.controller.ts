@@ -131,6 +131,7 @@ export class WorkflowController {
       dto.gitRefs?.map((r) => this.toGitRef(r)),
       dto.mcpServerRefs?.map((r) => this.toMcpServerRef(r)),
       dto.pauseAfter,
+      dto.reportFileRefs,
     );
   }
 }

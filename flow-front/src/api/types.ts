@@ -99,6 +99,7 @@ export interface WorkDefinitionInput {
   gitRefs?: GitRefInput[];
   mcpServerRefs?: McpServerRefInput[];
   taskDefinitions: TaskDefinitionInput[];
+  reportFileRefs?: number[];
 }
 
 export interface CreateWorkflowRequest {
@@ -133,6 +134,7 @@ export interface WorkflowResponse {
     order: number;
     model: string;
     pauseAfter: boolean;
+    reportFileRefs: number[];
     gitRefs: { gitId: string; baseBranch: string; valid: boolean }[];
     mcpServerRefs: { mcpServerId: string; envOverrides: Record<string, string>; valid: boolean }[];
     taskDefinitions: {
@@ -183,6 +185,7 @@ export interface WorkNodeConfigSummary {
   model: string;
   taskCount: number;
   pauseAfter: boolean;
+  reportFileRefs: number[];
   gitRefConfigs: { gitId: string; baseBranch: string }[];
   mcpServerRefConfigs: { mcpServerId: string; envOverrides: Record<string, string> }[];
   taskConfigs: TaskNodeConfigInput[];
@@ -230,6 +233,7 @@ export interface EditWorkNodeConfigRequest {
   pauseAfter?: boolean;
   gitRefConfigs?: GitRefNodeConfigInput[];
   mcpServerRefConfigs?: McpServerRefNodeConfigInput[];
+  reportFileRefs?: number[];
 }
 
 export interface AddWorkNodeRequest {
@@ -238,6 +242,7 @@ export interface AddWorkNodeRequest {
   pauseAfter?: boolean;
   gitRefConfigs?: GitRefNodeConfigInput[];
   mcpServerRefConfigs?: McpServerRefNodeConfigInput[];
+  reportFileRefs?: number[];
 }
 
 export interface StartWorkflowRunRequest {

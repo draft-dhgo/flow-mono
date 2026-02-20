@@ -64,4 +64,10 @@ export class EditWorkNodeConfigDto {
   @ValidateNested({ each: true })
   @Type(() => McpServerRefNodeConfigDto)
   mcpServerRefConfigs?: McpServerRefNodeConfigDto[];
+
+  @ApiPropertyOptional({ description: 'Indices of previous work nodes whose reports to symlink', type: [Number] })
+  @IsOptional()
+  @IsArray()
+  @IsInt({ each: true })
+  reportFileRefs?: number[];
 }

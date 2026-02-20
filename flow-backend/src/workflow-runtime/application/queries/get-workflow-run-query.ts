@@ -51,6 +51,7 @@ function serializeRun(run: WorkflowRun) {
       model: c.model,
       taskCount: c.taskConfigs.length,
       pauseAfter: c.pauseAfter,
+      reportFileRefs: [...c.reportFileRefs],
       gitRefConfigs: c.gitRefConfigs.map((g) => ({
         gitId: g.gitId,
         baseBranch: g.baseBranch,

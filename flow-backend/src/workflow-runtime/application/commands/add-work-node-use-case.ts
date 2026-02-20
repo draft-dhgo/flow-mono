@@ -21,6 +21,7 @@ export interface AddWorkNodeCommand {
   readonly gitRefConfigs?: GitRefNodeConfig[];
   readonly mcpServerRefConfigs?: McpServerRefNodeConfig[];
   readonly pauseAfter?: boolean;
+  readonly reportFileRefs?: number[];
 }
 
 @Injectable()
@@ -43,6 +44,7 @@ export class AddWorkNodeUseCase {
       gitRefConfigs: command.gitRefConfigs,
       mcpServerRefConfigs: command.mcpServerRefConfigs,
       pauseAfter: command.pauseAfter,
+      reportFileRefs: command.reportFileRefs,
     });
 
     run.addWorkNodeConfig(config);
