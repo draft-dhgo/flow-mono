@@ -1,0 +1,20 @@
+export enum WorkflowRunStatus {
+  INITIALIZED = 'INITIALIZED',
+  RUNNING = 'RUNNING',
+  PAUSED = 'PAUSED',
+  AWAITING = 'AWAITING',
+  COMPLETED = 'COMPLETED',
+  CANCELLED = 'CANCELLED',
+}
+
+export enum ReportStatus {
+  PENDING = 'PENDING',
+  COMPLETED = 'COMPLETED',
+  FAILED = 'FAILED',
+}
+
+export enum LinkType {
+  GIT_WORKTREE = 'GIT_WORKTREE',
+  MCP_CONFIG = 'MCP_CONFIG',
+  SHARED_RESOURCE = 'SHARED_RESOURCE',
+}

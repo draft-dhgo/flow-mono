@@ -1,0 +1,178 @@
+REST API를 통해 Git 레포, MCP 서버를 등록하고 워크플로우를 생성·활성화한 뒤 실행(이슈키: PROJ-1)까지 수행하는 End-to-End 통합 시나리오이다.
+코드 수정은 하지 않는다. 오직 서버를 기동하고 REST API를 호출하여 데이터를 생성·실행한다.
+UI에서 개별 노드의 Git/MCP 설정이 저장 후 풀리는 버그가 있으므로, 모든 설정은 REST API로 직접 수행한다.
+주의: USE_DB 기본값이 'true'로 변경되었다. DB 없이 실행하려면 USE_DB=false 환경변수가 필요하다.
+
+수행할 작업 목록:
+  1. 백엔드 빌드 및 서버 기동 (USE_DB=false)
+  2. Git 레포 등록 (https://github.com/draft-dhgo/test-repo-back-community.git)
+  3. GitHub MCP 서버 등록 (npx @modelcontextprotocol/server-github)
+  4. 워크플로우 생성 (이슈 번호 기반 GitHub 이슈 해결 워크플로우)
+  5. 워크플로우 활성화
+  6. 워크플로우 실행 (issueKey: PROJ-1)
+  7. 실행 상태 모니터링 및 완료 확인
+
+아래 4개 Phase를 순서대로 진행한다.
+각 Phase 완료 후 이전 Phase에서 받은 ID 값들이 올바르게 사용되고 있는지 확인한다.
+API 호출 실패 시 에러 메시지를 분석하고 원인을 파악하여 재시도한다.
+
+----- Phase 1 백엔드 빌드 및 서버 기동 -----
+
+1-1. 백엔드 빌드
+     cd flow-backend && npm run build
+     빌드 에러가 발생하면 분석하고 해결한다 (코드 수정이 아닌 환경 문제만).
+
+1-2. 백엔드 서버 기동
+     cd flow-backend && USE_DB=false npm run start
+     주의: npm run start:dev는 사용하지 않는다 (tsx가 emitDecoratorMetadata를 지원하지 않아 NestJS DI가 실패함).
+     서버가 백그라운드에서 실행되도록 한다.
+     http://localhost:3000 으로 접속하여 서버가 정상 기동되었는지 확인한다.
+
+1-3. 서버 헬스 체크
+     curl http://localhost:3000/gits 로 빈 배열 [] 이 반환되는지 확인한다.
+     curl http://localhost:3000/mcp-servers 로 빈 배열 [] 이 반환되는지 확인한다.
+     실패 시 서버 로그를 확인하고 재기동한다.
+
+----- Phase 2 Git 레포 및 MCP 서버 등록 -----
+
+2-1. Git 레포 등록
+     아래 API를 호출하여 Git 레포를 등록한다:
+     curl -X POST http://localhost:3000/gits \
+       -H "Content-Type: application/json" \
+       -d '{
+         "url": "https://github.com/draft-dhgo/test-repo-back-community.git",
+         "localPath": "repos/test-repo-back-community"
+       }'
+     응답에서 gitId를 저장한다. 이후 모든 Phase에서 이 gitId를 사용한다.
+
+2-2. Git 레포 등록 확인
+     curl http://localhost:3000/gits 로 등록된 Git 레포가 조회되는지 확인한다.
+     url, localPath가 요청값과 일치하는지 검증한다.
+
+2-3. GitHub MCP 서버 등록
+     먼저 GitHub 토큰을 가져온다:
+       GITHUB_TOKEN=$(gh auth token)
+     토큰이 정상적으로 출력되는지 확인한다 (gho_ 또는 ghp_ 접두사로 시작하는 문자열).
+
+     아래 API를 호출하여 GitHub MCP 서버를 등록한다.
+     jq를 사용하여 토큰을 안전하게 JSON에 삽입한다:
+       jq -n --arg token "$GITHUB_TOKEN" '{
+         name: "github",
+         command: "npx",
+         args: ["-y", "@modelcontextprotocol/server-github"],
+         env: { GITHUB_PERSONAL_ACCESS_TOKEN: $token },
+         transportType: "STDIO"
+       }' | curl -X POST http://localhost:3000/mcp-servers \
+         -H "Content-Type: application/json" \
+         -d @-
+     jq가 없으면 printf로 JSON을 구성한다:
+       printf '{"name":"github","command":"npx","args":["-y","@modelcontextprotocol/server-github"],"env":{"GITHUB_PERSONAL_ACCESS_TOKEN":"%s"},"transportType":"STDIO"}' "$GITHUB_TOKEN" | curl -X POST http://localhost:3000/mcp-servers -H "Content-Type: application/json" -d @-
+     응답에서 mcpServerId를 저장한다.
+
+2-4. MCP 서버 등록 확인
+     curl http://localhost:3000/mcp-servers 로 등록된 MCP 서버가 조회되는지 확인한다.
+     name이 "github"이고 transportType이 "STDIO"인지 검증한다.
+
+----- Phase 3 워크플로우 생성 및 활성화 -----
+
+3-1. 워크플로우 생성
+     아래 API를 호출한다. {GIT_ID}와 {MCP_SERVER_ID}는 Phase 2에서 받은 실제 ID로 대체한다:
+     curl -X POST http://localhost:3000/workflows \
+       -H "Content-Type: application/json" \
+       -d '{
+         "name": "GitHub 이슈 해결 워크플로우",
+         "description": "이슈 번호를 받아 GitHub에서 해당 이슈를 조회하고 코드를 수정하여 해결하는 워크플로우",
+         "branchStrategy": "feature/{issueKey}",
+         "gitRefs": [
+           {
+             "gitId": "{GIT_ID}",
+             "baseBranch": "main"
+           }
+         ],
+         "mcpServerRefs": [
+           {
+             "mcpServerId": "{MCP_SERVER_ID}"
+           }
+         ],
+         "workDefinitions": [
+           {
+             "order": 0,
+             "model": "claude-sonnet-4-20250514",
+             "taskDefinitions": [
+               {
+                 "order": 0,
+                 "query": "GitHub MCP 도구를 사용하여 draft-dhgo/test-repo-back-community 저장소의 이슈 목록에서 PROJ-1 이슈를 찾아 내용을 확인하세요. 이슈 제목과 본문을 읽고 요구사항을 정리하세요. 이슈 내용: 백엔드 구조 스케폴딩이 필요합니다. NestJS 기본 프로젝트를 구성하세요."
+               },
+               {
+                 "order": 1,
+                 "query": "이전 단계에서 파악한 이슈 요구사항에 따라 코드를 수정하세요. NestJS 기본 프로젝트 구조를 스케폴딩하세요. 작업이 완료되면 변경사항을 git commit 하세요."
+               }
+             ],
+             "gitRefs": [
+               {
+                 "gitId": "{GIT_ID}",
+                 "baseBranch": "main"
+               }
+             ],
+             "mcpServerRefs": [
+               {
+                 "mcpServerId": "{MCP_SERVER_ID}"
+               }
+             ]
+           }
+         ]
+       }'
+     응답에서 workflowId를 저장한다 (id 필드).
+
+3-2. 워크플로우 생성 확인
+     curl http://localhost:3000/workflows/{WORKFLOW_ID} 로 워크플로우를 조회한다.
+     - status가 "DRAFT"인지 확인
+     - gitRefs에 등록한 gitId가 포함되어 있는지 확인
+     - mcpServerRefs에 등록한 mcpServerId가 포함되어 있는지 확인
+     - workDefinitions의 taskDefinitions가 2개인지 확인
+
+3-3. 워크플로우 활성화
+     curl -X POST http://localhost:3000/workflows/{WORKFLOW_ID}/activate
+     에러 없이 성공하는지 확인한다.
+
+3-4. 활성화 확인
+     curl http://localhost:3000/workflows/{WORKFLOW_ID} 로 재조회하여 status가 "ACTIVE"인지 확인한다.
+
+----- Phase 4 워크플로우 실행 및 모니터링 -----
+
+4-1. 워크플로우 실행
+     curl -X POST http://localhost:3000/workflow-runs \
+       -H "Content-Type: application/json" \
+       -d '{
+         "workflowId": "{WORKFLOW_ID}",
+         "issueKey": "PROJ-1"
+       }'
+     응답에서 workflowRunId를 저장한다.
+     status가 "INITIALIZED"로 시작하는지 확인한다.
+
+4-2. 실행 상태 모니터링
+     5초 간격으로 아래 API를 호출하여 상태를 확인한다:
+     curl http://localhost:3000/workflow-runs/{WORKFLOW_RUN_ID}
+     확인할 항목:
+     - status 변화: INITIALIZED → RUNNING → (PAUSED/AWAITING) → COMPLETED
+     - currentWorkIndex 변화
+     - workExecutionIds가 추가되는지
+     최대 5분간 모니터링한다.
+
+4-3. 에이전트 로그 확인
+     workExecutionIds에서 ID를 가져와 에이전트 로그를 확인한다:
+     curl http://localhost:3000/workflow-runs/{WORKFLOW_RUN_ID}/work-executions/{WORK_EXECUTION_ID}/agent-logs
+     로그가 쌓이고 있는지 확인한다.
+
+4-4. 최종 결과 확인
+     워크플로우 런 상태가 COMPLETED 또는 CANCELLED가 되면:
+     - 최종 상태를 출력한다
+     - 에이전트 로그 마지막 항목들을 출력한다
+     - checkpoints를 조회한다: curl http://localhost:3000/workflow-runs/{WORKFLOW_RUN_ID}/checkpoints
+
+     RUNNING 상태가 5분 이상 지속되면:
+     - 에이전트 로그를 확인하여 진행 상황을 파악한다
+     - 필요시 현재 상태를 그대로 출력하고 종료한다
+
+모든 Phase가 완료되고 워크플로우 실행이 시작(RUNNING 상태 진입)되면 E2E WORKFLOW RUN STARTED 를 출력한다.
+워크플로우 실행이 완료(COMPLETED)되면 E2E WORKFLOW RUN COMPLETE 를 출력한다.

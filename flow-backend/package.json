@@ -1,0 +1,70 @@
+{
+  "name": "workflow-backend",
+  "version": "1.0.0",
+  "description": "Workflow management backend with Hexagonal Architecture",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc && tsc-alias",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "lint": "eslint src tests",
+    "lint:fix": "eslint src tests --fix",
+    "format": "prettier --write \"src/**/*.ts\" \"tests/**/*.ts\"",
+    "typecheck": "tsc --noEmit",
+    "start": "node dist/main.js",
+    "start:dev": "node --import tsx src/main.ts"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/draft-dhgo/study-docs.git"
+  },
+  "keywords": [
+    "workflow",
+    "hexagonal-architecture",
+    "ddd"
+  ],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/draft-dhgo/study-docs/issues"
+  },
+  "homepage": "https://github.com/draft-dhgo/study-docs#readme",
+  "devDependencies": {
+    "@eslint/js": "^9.39.2",
+    "@nestjs/cli": "^11.0.16",
+    "@nestjs/testing": "^11.1.13",
+    "@swc/core": "^1.15.11",
+    "@types/express": "^5.0.6",
+    "@types/node": "^25.2.0",
+    "@types/uuid": "^10.0.0",
+    "eslint": "^9.39.2",
+    "eslint-config-prettier": "^10.1.8",
+    "prettier": "^3.8.1",
+    "tsc-alias": "^1.8.16",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.54.0",
+    "unplugin-swc": "^1.5.9",
+    "vitest": "^4.0.18"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.2.41",
+    "@modelcontextprotocol/sdk": "^1.26.0",
+    "@nestjs/common": "^11.1.13",
+    "@nestjs/core": "^11.1.13",
+    "@nestjs/platform-express": "^11.1.13",
+    "@nestjs/swagger": "^11.2.6",
+    "@nestjs/typeorm": "^11.0.0",
+    "class-transformer": "^0.5.1",
+    "class-validator": "^0.14.3",
+    "dotenv": "^17.3.1",
+    "pg": "^8.18.0",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.2",
+    "typeorm": "^0.3.28",
+    "uuid": "^13.0.0",
+    "zod": "^4.3.6"
+  }
+}

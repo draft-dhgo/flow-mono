@@ -1,0 +1,368 @@
+# 작업: 프론트엔드 프로젝트 구현
+
+## 목표
+
+'.front-design/' 디렉토리의 설계 문서(README.md, pages/, apis/)를 기반으로 React 프론트엔드 프로젝트를 구현한다.
+**모든 체크리스트 항목이 통과할 때까지 반복한다.**
+
+## 참조 문서
+
+| 문서 | 경로 | 역할 |
+|------|------|------|
+| 전체 설계 | '.front-design/README.md' | 기술 스택, 디렉토리 구조, 라우팅, 공유 타입 |
+| Dashboard | '.front-design/pages/dashboard.md' | 대시보드 페이지 UI/인터랙션 |
+| Workflow 관리 | '.front-design/pages/workflow-management.md' | 워크플로우 CRUD 페이지 UI/인터랙션 |
+| Git 관리 | '.front-design/pages/git-management.md' | Git 저장소 관리 페이지 UI/인터랙션 |
+| MCP Server 관리 | '.front-design/pages/mcp-server-management.md' | MCP 서버 관리 페이지 UI/인터랙션 |
+| 실행 상세 | '.front-design/pages/workflow-run.md' | 워크플로우 실행 상세 페이지 UI/인터랙션 |
+| 에이전트 세션 | '.front-design/pages/agent-session.md' | 에이전트 채팅 페이지 UI/인터랙션 |
+| Git API | '.front-design/apis/git.md' | Git API 스펙 (요청/응답/에러) |
+| MCP Server API | '.front-design/apis/mcp-server.md' | MCP Server API 스펙 |
+| Workflow API | '.front-design/apis/workflow.md' | Workflow API 스펙 |
+| Workflow Run API | '.front-design/apis/workflow-run.md' | Workflow Run API 스펙 |
+| Agent Session API | '.front-design/apis/agent-session.md' | Agent Session API 스펙 |
+
+## 수정 허용 범위
+
+- **수정 가능:** 'src/' 디렉토리 내 프론트엔드 소스 코드, 프로젝트 루트 설정 파일(vite.config.ts, tailwind.config.ts, tsconfig.json, package.json 등)
+- **수정 금지:** '.front-design/' 디렉토리 내 설계 문서, 백엔드 소스 코드
+
+## 구현 방법
+
+각 체크리스트 항목에 대해:
+1. **설계 문서**의 해당 섹션을 읽어 요구사항을 파악한다
+2. **API 스펙 문서**(apis/)에서 요청/응답 타입, 에러 코드를 확인한다
+3. 설계 문서의 컴포넌트 트리, 상태 관리, 인터랙션 흐름에 따라 구현한다
+4. 구현 후 체크리스트 항목이 충족되는지 검증한다
+
+## 체크리스트
+
+### Phase 1. 프로젝트 초기화 및 기반 설정
+
+**참조:** 'README.md' §1(기술 스택), §2(디렉토리 구조)
+
+프로젝트 스캐폴딩, 의존성 설치, 빌드 설정을 완료한다.
+
+- [ ] Vite + React 18 + TypeScript 5 프로젝트가 생성되어 있는가
+- [ ] 의존성이 모두 설치되어 있는가: react-router-dom, @tanstack/react-query, react-hook-form, zod, @hookform/resolvers, axios, tailwindcss, lucide-react, react-markdown
+- [ ] shadcn/ui가 초기화되어 있고, 기본 컴포넌트(Button, Input, Dialog, Select, Table, Badge, Card, Tabs, Textarea, Checkbox, DropdownMenu, RadioGroup, Tooltip)가 추가되어 있는가
+- [ ] Tailwind CSS가 설정되어 있고, 'index.css'에 Tailwind 디렉티브가 포함되어 있는가
+- [ ] 'src/' 디렉토리 구조가 README §2에 정의된 레이아웃과 일치하는가: 'api/', 'components/', 'hooks/', 'pages/', 'lib/- [ ] 'tsconfig.json'에 path alias('@/' → 'src/')가 설정되어 있는가
+- [ ] 'vite.config.ts'에 path alias 해석이 설정되어 있는가
+- [ ] 'npm run dev'로 개발 서버가 정상 기동되는가
+
+### Phase 2. API 클라이언트 레이어
+
+**참조:** 'README.md' §5(API 클라이언트), 'apis/*.md' 전체
+
+타입 정의와 API 함수를 구현하여 백엔드와의 통신 기반을 마련한다.
+
+#### 2-1. Axios 인스턴스 및 에러 처리
+
+- [ ] 'api/client.ts': Axios 인스턴스가 'README.md' §5.1에 따라 생성되어 있는가 (baseURL, timeout, Content-Type)
+- [ ] 'api/client.ts': 응답 인터셉터에서 에러를 'ApiError' 형태로 정규화하는가 (code, message, status)
+
+#### 2-2. 공유 타입 정의
+
+- [ ] 'api/types.ts': 'WorkflowStatus' = ''DRAFT' | 'ACTIVE'' 타입이 정의되어 있는가
+- [ ] 'api/types.ts': 'WorkflowRunStatus' = ''INITIALIZED' | 'RUNNING' | 'PAUSED' | 'AWAITING' | 'COMPLETED' | 'CANCELLED'' 타입이 정의되어 있는가
+- [ ] 'api/types.ts': 'McpTransportType' = ''STDIO' | 'SSE' | 'STREAMABLE_HTTP'' 타입이 정의되어 있는가
+- [ ] 'api/types.ts': 'ApiError' 인터페이스가 정의되어 있는가 (code, message, status)
+- [ ] 'api/types.ts': 'RunSummary' 인터페이스에 running, paused, awaiting, completed, cancelled, initialized 필드가 있는가
+
+#### 2-3. 도메인별 타입 및 API 함수
+
+**Git** — 'apis/git.md' 참조:
+
+- [ ] 'api/types.ts': 'GitResponse' (id, url, localPath), 'CreateGitRequest' (url, localPath) 인터페이스가 정의되어 있는가
+- [ ] 'api/gits.ts': 'list()', 'create(data)', 'delete(id)' API 함수가 구현되어 있는가
+- [ ] 'api/gits.ts': 엔드포인트 경로가 'GET /gits', 'POST /gits', 'DELETE /gits/:id'와 일치하는가
+
+**MCP Server** — 'apis/mcp-server.md' 참조:
+
+- [ ] 'api/types.ts': 'McpServerResponse' (id, name, command, args, env, transportType, url), 'RegisterMcpServerRequest' (name, command, args?, env?, transportType, url?) 인터페이스가 정의되어 있는가
+- [ ] 'api/mcp-servers.ts': 'list()', 'register(data)', 'unregister(id)' API 함수가 구현되어 있는가
+- [ ] 'api/mcp-servers.ts': 엔드포인트 경로가 'GET /mcp-servers', 'POST /mcp-servers', 'DELETE /mcp-servers/:id'와 일치하는가
+
+**Workflow** — 'apis/workflow.md' 참조:
+
+- [ ] 'api/types.ts': 'CreateWorkflowRequest', 'UpdateWorkflowRequest', 'WorkflowResponse', 'WorkflowListItem' 인터페이스가 API 스펙과 일치하는가
+- [ ] 'api/types.ts': 'GitRefInput', 'McpServerRefInput', 'WorkDefinitionInput', 'TaskDefinitionInput', 'ReportOutlineInput', 'SectionInput' 중첩 타입이 정의되어 있는가
+- [ ] 'api/types.ts': 'WorkflowListItem'의 'branchStrategy'가 'string' 타입인가 (객체가 아님)
+- [ ] 'api/workflows.ts': 'list()', 'get(id)', 'create(data)', 'update(id, data)', 'delete(id)', 'activate(id)', 'deactivate(id)' API 함수가 구현되어 있는가
+
+**Workflow Run** — 'apis/workflow-run.md' 참조:
+
+- [ ] 'api/types.ts': 'WorkflowRunDetailResponse'에 id, workflowId, status, currentWorkIndex, totalWorkCount, cancelledAtWorkIndex, cancellationReason, restoredToCheckpoint 필드가 있는가
+- [ ] 'api/types.ts': 'WorkflowRunListItem' (id, workflowId, workflowName, status, currentWorkIndex, totalWorkCount, createdAt) 인터페이스가 정의되어 있는가
+- [ ] 'api/types.ts': 'CheckpointResponse' (id, workflowRunId, workflowId, workExecutionId, workSequence, createdAt) 인터페이스가 정의되어 있는가
+- [ ] 'api/types.ts': 'EditWorkNodeConfigRequest', 'AddWorkNodeRequest', 'TaskNodeConfigInput' 인터페이스가 정의되어 있는가
+- [ ] 'api/types.ts': 'StartWorkflowRunRequest' (workflowId), 'ResumeWorkflowRunRequest' (checkpointId?), 'CancelWorkflowRunRequest' (reason?) 인터페이스가 정의되어 있는가
+- [ ] 'api/workflow-runs.ts': 'start(data)', 'getDetail(id)', 'list()', 'getSummary()', 'getCheckpoints(id)' 쿼리 함수가 구현되어 있는가
+- [ ] 'api/workflow-runs.ts': 'pause(id)', 'resume(id, checkpointId?)', 'cancel(id, reason?)', 'delete(id)' 액션 함수가 구현되어 있는가
+- [ ] 'api/workflow-runs.ts': 'editWorkNode(id, sequence, config)', 'addWorkNode(id, config)', 'deleteWorkNode(id, sequence)' Work Node CRUD 함수가 구현되어 있는가
+
+**Agent Session** — 'apis/agent-session.md' 참조:
+
+- [ ] 'api/types.ts': 'AgentSessionResponse' (id, workExecutionId, workflowRunId, model, isAssigned) 인터페이스가 정의되어 있는가
+- [ ] 'api/types.ts': 'QueryResultResponse' (response, tokensUsed?) 인터페이스가 정의되어 있는가
+- [ ] 'api/agent-sessions.ts': 'getByWorkExecution(workExecutionId)', 'sendQuery(workExecutionId, query)', 'stop(workExecutionId)' API 함수가 구현되어 있는가
+- [ ] 'api/agent-sessions.ts': 모든 엔드포인트 경로가 ':workExecutionId'를 path param으로 사용하는가 (':agentSessionId'가 아님)
+
+#### 2-4. 쿼리 키 및 TanStack Query 설정
+
+- [ ] 'lib/query-keys.ts' 또는 'api/' 내: 'queryKeys' 객체가 'README.md' §6의 캐시 키 설계와 일치하는가 (workflows, gits, mcpServers, workflowRuns, agentSessions)
+- [ ] 'main.tsx' 또는 'App.tsx': 'QueryClientProvider'가 설정되어 있는가
+
+### Phase 3. 공통 컴포넌트 및 레이아웃
+
+**참조:** 'README.md' §2(디렉토리 구조), §3(라우팅), §7(공통 컴포넌트)
+
+라우팅, 레이아웃, 재사용 컴포넌트를 구현한다.
+
+#### 3-1. 라우팅
+
+- [ ] 'App.tsx': React Router v6으로 'README.md' §3의 라우트가 모두 정의되어 있는가: '/', '/workflows', '/workflows/new', '/workflows/:id/edit', '/gits', '/mcp-servers', '/workflow-runs/:id', '/workflow-runs/:id/agent
+#### 3-2. 레이아웃
+
+- [ ] 'components/layout/AppLayout.tsx': Sidebar + 메인 콘텐츠 영역 2단 레이아웃이 구현되어 있는가
+- [ ] 'components/layout/Sidebar.tsx': Dashboard, Workflows, Git, MCP Servers 네비게이션 링크가 있고, 현재 경로에 active 스타일이 적용되는가
+- [ ] 'components/layout/PageHeader.tsx': 타이틀과 우측 액션 버튼 영역을 렌더링하는가
+
+#### 3-3. 재사용 컴포넌트
+
+- [ ] 'components/StatusBadge.tsx': 'WorkflowRunStatus'/'WorkflowStatus' 값에 따라 색상이 다른 뱃지를 렌더링하는가 (RUNNING=green, PAUSED=yellow, AWAITING=orange, COMPLETED=blue, CANCELLED=red, DRAFT=gray, ACTIVE=green)
+- [ ] 'components/ConfirmDialog.tsx': 제목, 설명, 확인/취소 버튼을 포함하는 모달 다이얼로그가 구현되어 있는가
+- [ ] 'components/DataTable.tsx': 컬럼 정의를 받아 테이블을 렌더링하고, 빈 상태 처리를 포함하는가
+- [ ] 'components/EmptyState.tsx': 데이터 없을 때 안내 메시지와 CTA 버튼을 표시하는가
+- [ ] 'components/ErrorAlert.tsx': 'ApiError'를 받아 에러 메시지를 표시하는가
+- [ ] 'components/LoadingSpinner.tsx': 로딩 인디케이터가 구현되어 있는가
+
+### Phase 4. Git 저장소 관리 페이지
+
+**참조:** 'pages/git-management.md', 'apis/git.md
+#### 4-1. 페이지 구조
+
+- [ ] 'pages/GitManagementPage.tsx': 컴포넌트 트리가 설계 문서의 구조와 일치하는가 (PageHeader, GitTable, GitRegisterDialog, GitDeleteDialog)
+- [ ] 목록: 'GET /gits' 호출로 Git 저장소 목록을 테이블에 표시하는가 (URL, LocalPath, 참조 수 컬럼)
+
+#### 4-2. 등록 다이얼로그
+
+- [ ] 'GitRegisterDialog': URL, LocalPath 입력 필드가 있고, Zod 스키마('git-management.md'의 유효성 규칙)로 실시간 검증하는가
+- [ ] 등록 성공 시 다이얼로그 닫힘 + 목록 새로고침(캐시 무효화)이 동작하는가
+- [ ] 등록 실패 시 다이얼로그 내 에러 메시지('ErrorAlert')가 표시되는가
+
+#### 4-3. 삭제 다이얼로그 — 차단/허용 분기
+
+- [ ] 'GitDeleteDialog': 'refCount > 0'일 때 **삭제 차단 UI**를 표시하는가 (삭제 버튼 없음, "참조 제거 후 삭제" 안내, 참조 워크플로우 목록)
+- [ ] 'GitDeleteDialog': 'refCount === 0'일 때 **삭제 확인 UI**를 표시하는가 (경고 메시지, 취소/삭제 버튼)
+- [ ] 삭제 성공 시 목록 새로고침이 동작하는가
+
+#### 4-4. 커스텀 훅
+
+- [ ] 'hooks/useGits.ts': 목록 쿼리('queryKeys.gits.all'), 등록 뮤테이션, 삭제 뮤테이션이 구현되어 있고, 뮤테이션 성공 시 캐시 무효화가 동작하는가
+
+### Phase 5. MCP 서버 관리 페이지
+
+**참조:** 'pages/mcp-server-management.md', 'apis/mcp-server.md
+#### 5-1. 페이지 구조
+
+- [ ] 'pages/McpServerManagementPage.tsx': 컴포넌트 트리가 설계 문서와 일치하는가 (PageHeader, McpServerTable, McpRegisterDialog, McpDeleteDialog)
+- [ ] 목록: 'GET /mcp-servers' 호출로 MCP 서버 목록을 테이블에 표시하는가 (Name, Transport 뱃지, Command/URL, 참조 수 컬럼)
+
+#### 5-2. 등록 다이얼로그
+
+- [ ] 'McpRegisterDialog': name, command, args(동적 배열), env(키-값 동적 편집), transportType(Radio), url(조건부) 필드가 모두 구현되어 있는가
+- [ ] Transport Type에 따른 조건부 필드: STDIO 선택 시 URL 비활성화, SSE/STREAMABLE_HTTP 선택 시 URL 필수 활성화가 동작하는가
+- [ ] Zod 스키마('mcp-server-management.md'의 유효성 규칙)로 검증하는가
+
+#### 5-3. 삭제 다이얼로그 — 차단/허용 분기
+
+- [ ] 'McpDeleteDialog': 'refCount > 0'일 때 **차단 UI** (해제 버튼 비활성화, 참조 워크플로우 목록), 'refCount === 0'일 때 **허용 UI** (확인 다이얼로그)가 모두 구현되어 있는가
+
+#### 5-4. 커스텀 훅
+
+- [ ] 'hooks/useMcpServers.ts': 목록 쿼리, 등록 뮤테이션, 해제 뮤테이션이 구현되어 있는가
+
+### Phase 6. 워크플로우 관리 페이지
+
+**참조:** 'pages/workflow-management.md', 'apis/workflow.md
+#### 6-1. 목록 페이지
+
+- [ ] 'pages/WorkflowListPage.tsx': 워크플로우 목록 테이블에 Name, Status(DRAFT/ACTIVE), IssueKey, Git 참조 수, MCP 참조 수, Work 수 컬럼이 표시되는가
+- [ ] RowActions 드롭다운이 상태에 따라 분기되는가: DRAFT → 수정/활성화/삭제, ACTIVE → 실행/비활성화
+- [ ] ACTIVE 상태에서 수정/삭제 메뉴가 표시되지 않는가
+
+#### 6-2. 생성/수정 폼
+
+- [ ] 'pages/WorkflowFormPage.tsx': 생성('/workflows/new')과 수정('/workflows/:id/edit') 모드를 공용으로 처리하는가
+- [ ] 기본 정보 섹션: name(필수), description, issueKey(필수, 패턴 검증), branchStrategy(필수, 단순 TextField)가 있는가
+- [ ] Git 참조 섹션: 'useFieldArray'로 동적 추가/삭제, Git 드롭다운('GET /gits'), baseBranch 입력이 동작하는가
+- [ ] MCP 서버 참조 섹션: 'useFieldArray'로 동적 추가/삭제, MCP 드롭다운('GET /mcp-servers'), envOverrides 편집이 동작하는가
+- [ ] Work Definitions 섹션: 'useFieldArray'로 동적 추가/삭제/드래그 정렬, 각 Work에 model 선택, pauseAfter 체크박스, 선택적 Git/MCP 오버라이드가 있는가
+- [ ] Task Definitions 중첩 섹션: Work 내부에 'useFieldArray'로 동적 Task 추가/삭제/드래그 정렬, query(필수), 선택적 reportOutline(sections 배열)이 있는가
+- [ ] Zod 스키마가 'workflow-management.md'의 유효성 규칙과 일치하는가
+
+#### 6-3. 활성화/비활성화/실행/삭제 액션
+
+- [ ] 활성화 액션: 'POST /workflows/:id/activate' 호출, 성공 시 목록 새로고침, 실패 시 에러 토스트가 동작하는가
+- [ ] 비활성화 액션: 'POST /workflows/:id/deactivate' 호출, 성공 시 DRAFT로 복귀가 동작하는가
+- [ ] 실행 액션 (ACTIVE만): 'POST /workflow-runs' 호출, 성공 시 '/workflow-runs/:id'로 이동하는가
+- [ ] 삭제 액션 (DRAFT만): 'ConfirmDialog' 표시 후 'DELETE /workflows/:id' 호출이 동작하는가
+
+#### 6-4. 커스텀 훅
+
+- [ ] 'hooks/useWorkflows.ts': 목록 쿼리, 상세 쿼리, 생성/수정/삭제/활성화/비활성화 뮤테이션이 모두 구현되어 있는가
+
+### Phase 7. 대시보드 페이지
+
+**참조:** 'pages/dashboard.md', 'apis/workflow-run.md
+#### 7-1. 요약 카드
+
+- [ ] 'RunSummaryCards': RUNNING("실행 중"), PAUSED("일시정지"), AWAITING("대기 중"), COMPLETED("완료"), CANCELLED("취소") 5개 카드가 표시되는가
+- [ ] 요약 데이터가 'GET /workflow-runs/summary'(또는 목록에서 클라이언트 집계)로 로드되는가
+
+#### 7-2. 최근 실행 목록
+
+- [ ] 'RunsTable': WorkflowName, Status(StatusBadge), Progress(Work N/M), Actions 컬럼이 표시되는가
+- [ ] ActionButtons 상태 분기: RUNNING → 일시정지/취소, PAUSED → 재개/취소, AWAITING → 계속/취소, COMPLETED/CANCELLED → 삭제
+- [ ] 실행 행 클릭 시 '/workflow-runs/:id'로 이동하는가
+- [ ] RUNNING 상태가 있을 때 3초 간격 자동 폴링이 동작하는가
+
+#### 7-3. 액션 동작
+
+- [ ] 일시정지: 'POST /workflow-runs/:id/pause' 즉시 호출이 동작하는가
+- [ ] 재개: 'POST /workflow-runs/:id/resume' 즉시 호출이 동작하는가
+- [ ] 취소: 'ConfirmDialog'(reason 입력) → 'POST /workflow-runs/:id/cancel' 호출이 동작하는가
+- [ ] 삭제: 'ConfirmDialog' → 'DELETE /workflow-runs/:id' 호출이 동작하는가
+
+#### 7-4. 커스텀 훅
+
+- [ ] 'hooks/useWorkflowRuns.ts': 목록 쿼리(3초 폴링), 요약 쿼리, pause/resume/cancel/delete 뮤테이션이 구현되어 있는가
+
+### Phase 8. 워크플로우 실행 상세 페이지
+
+**참조:** 'pages/workflow-run.md', 'apis/workflow-run.md
+#### 8-1. 실행 개요 및 상태
+
+- [ ] 'pages/WorkflowRunDetailPage.tsx': PageHeader(워크플로우 이름, StatusBadge), RunOverview(ProgressBar, ActionButtons)가 구현되어 있는가
+- [ ] ActionButtons 상태 분기: RUNNING → 일시정지/취소/에이전트세션, PAUSED → 재개/취소, AWAITING → 계속/취소
+- [ ] ResumeButton 라벨 구분: PAUSED → "재개", AWAITING → "계속"
+
+#### 8-2. 실행 타임라인
+
+- [ ] 'ExecutionTimeline': Work별 스텝퍼/아코디언 형태로 Work → Task 진행 상황이 시각화되는가
+- [ ] StepIcon: ✅(완료), 🔵(진행중), 🟠(AWAITING 대기중), ⬜(대기), ❌(취소) 아이콘이 구현되어 있는가
+- [ ] Task별: TaskIcon, query 표시, StatusBadge, 완료 시 "리포트 보기" 버튼이 있는가
+- [ ] 완료된 Work에 CheckpointMarker(타임스탬프, 복원 버튼)가 표시되는가
+
+#### 8-3. 리포트 뷰어
+
+- [ ] 'ReportViewer': 모달 또는 슬라이드오버로 리포트 마크다운을 'react-markdown'으로 렌더링하는가
+- [ ] 리포트 데이터가 'GET /reports/:id' 호출로 온디맨드 로드되는가
+
+#### 8-4. 체크포인트 복원
+
+- [ ] 'CheckpointSection': PAUSED/AWAITING 상태일 때 체크포인트 테이블(sequence, workSequence, timestamp, 복원 버튼)이 표시되는가
+- [ ] 체크포인트 복원 클릭 → 'RestoreConfirmDialog' → 'POST /workflow-runs/:id/resume' (checkpointId 포함) 호출이 동작하는가
+- [ ] PAUSED resume(checkpointId 없음) → 체크포인트 복원 + 현재 Work 재실행이 정확히 동작하는가
+- [ ] AWAITING resume(checkpointId 없음) → 다음 Work부터 실행 계속(복원 없음)이 정확히 동작하는가
+
+#### 8-5. Work Node CRUD (런타임 편집)
+
+- [ ] 'WorkNodeEditorSection': PAUSED/AWAITING 상태에서만 표시되는가
+- [ ] 편집 가능 범위 표시: currentWorkIndex 기준으로 편집 가능한 Work Node만 수정/삭제 버튼이 노출되는가
+- [ ] 'WorkNodeEditDialog': model, pauseAfter, taskConfigs(useFieldArray) 수정 → 'PUT /workflow-runs/:id/work-nodes/:sequence' 호출이 동작하는가
+- [ ] 'WorkNodeAddDialog': model, pauseAfter, taskConfigs 입력 → 'POST /workflow-runs/:id/work-nodes' 호출이 동작하는가
+- [ ] 'DeleteConfirmDialog': 확인 → 'DELETE /workflow-runs/:id/work-nodes/:sequence' 호출이 동작하는가
+- [ ] Work Node 변경 후 실행 상세 데이터(캐시) 무효화가 동작하는가
+
+#### 8-6. 폴링 전략
+
+- [ ] RUNNING 상태일 때만 3초 간격 자동 폴링이 동작하는가
+- [ ] PAUSED, AWAITING, COMPLETED, CANCELLED 상태에서는 폴링이 중단되는가
+
+#### 8-7. 커스텀 훅 (추가)
+
+- [ ] 'hooks/useWorkflowRuns.ts': 'getDetail' 쿼리(조건부 폴링), 'getCheckpoints' 쿼리, resume(checkpointId 지원), editWorkNode/addWorkNode/deleteWorkNode 뮤테이션이 구현되어 있는가
+
+### Phase 9. 에이전트 세션 페이지
+
+**참조:** 'pages/agent-session.md', 'apis/agent-session.md
+#### 9-1. ID 해석 흐름
+
+- [ ] 라우트 파라미터 'runId'에서 시작하여 3단계 해석이 구현되어 있는가: runId → 'GET /workflow-runs/:runId'(runDetail) → 'workExecutionIds[currentWorkIndex]'(workExecutionId) → 'GET /agent-sessions/:workExecutionId'(session)
+- [ ] 각 단계에서 Loading/Error 상태가 처리되는가
+
+#### 9-2. 상태 분기 UI
+
+- [ ] 로딩 중: 'LoadingSpinner'가 표시되는가
+- [ ] workExecutionId가 없을 때: 'EmptyState'("현재 활성 WorkExecution이 없습니다") + 돌아가기 링크가 표시되는가
+- [ ] 에이전트 세션이 없을 때: 'EmptyState'("에이전트 세션이 활성화되지 않았습니다") + 돌아가기 링크가 표시되는가
+
+#### 9-3. 채팅 UI
+
+- [ ] 'SessionHeader': 세션 정보(이슈키, Work #N, 모델, 상태), 돌아가기 링크, 세션 종료 버튼이 있는가
+- [ ] 'ChatContainer': 메시지 목록이 역순 렌더링(자동 스크롤)되는가
+- [ ] 'AgentMessage': 'react-markdown'으로 마크다운 렌더링(코드 블록, 테이블 등)이 동작하는가
+- [ ] 'UserMessage': 사용자 쿼리가 플레인 텍스트로 표시되는가
+- [ ] 'ErrorMessage': 에러가 빨간색 배경으로 표시되는가
+
+#### 9-4. 쿼리 전송
+
+- [ ] 'QueryInput': TextArea + 전송 버튼이 있고, Ctrl+Enter로 전송이 가능한가
+- [ ] 전송 시 Optimistic UI: 사용자 메시지 즉시 추가 + 전송 버튼 disabled가 동작하는가
+- [ ] 응답 수신: 'QueryResultResponse'의 type에 따라 agent/error 메시지가 추가되는가
+- [ ] 'POST /agent-sessions/:workExecutionId/queries' 호출이 정확한 경로로 이루어지는가
+
+#### 9-5. 세션 종료
+
+- [ ] "세션 종료" 클릭 → 'StopConfirmDialog' → 'DELETE /agent-sessions/:workExecutionId' → '/workflow-runs/:runId'로 이동이 동작하는가
+
+#### 9-6. 커스텀 훅
+
+- [ ] 'hooks/useAgentSession.ts': runDetail 쿼리 → workExecutionId 추출 → agentSession 쿼리 체인, sendQuery 뮤테이션, stopSession 뮤테이션이 구현되어 있는가
+
+### Phase 10. 유틸리티 및 마무리
+
+**참조:** 'README.md' §2(lib/)
+
+- [ ] 'lib/constants.ts': 상태별 색상 매핑, 모델 목록 등 상수가 정의되어 있는가
+- [ ] 'lib/format.ts': 날짜 포맷(ISO 8601 → 사용자 표시), 상태 라벨 변환(RUNNING → "실행 중") 유틸이 구현되어 있는가
+- [ ] 전체 빌드('npm run build')가 에러 없이 성공하는가
+- [ ] TypeScript 컴파일('npx tsc --noEmit')이 에러 없이 성공하는가
+
+## 반복 절차
+
+이 프롬프트는 Ralph Loop 방식으로 반복 실행된다. 매 반복(iteration)에서:
+
+1. **현재 상태 확인**: 'src/' 디렉토리의 파일과 git 이력을 확인하여 이전 반복에서 이미 구현된 내용을 파악한다
+2. **체크리스트 검증**: 위 체크리스트를 **Phase 순서대로** 순회하며, 이미 구현된 항목은 건너뛴다
+3. **미충족 항목 구현**: 미충족 항목을 발견하면 해당 설계 문서를 참조하여 구현/수정한다
+4. **빌드 검증**: 변경 후 'npm run build' 및 'npx tsc --noEmit'으로 빌드 에러가 없는지 확인한다
+5. **결과 보고**: 모든 항목이 통과하면 아래 결과 테이블을 출력하고 완료 신호를 보낸다
+
+> **핵심**: 이전 반복의 작업은 파일 시스템에 그대로 남아 있다. 이미 완료된 항목을 다시 구현하지 말고, 미완료 항목에 집중하라.
+
+## 결과 보고
+
+모든 구현이 완료되면 아래 형식으로 보고하라:
+
+| # | Phase | 항목 수 | 통과 | 미통과 | 비고 |
+|---|-------|---------|------|--------|------|
+| 1 | 프로젝트 초기화 | 8 | | | |
+| 2 | API 클라이언트 레이어 | 28 | | | |
+| 3 | 공통 컴포넌트/레이아웃 | 10 | | | |
+| 4 | Git 관리 페이지 | 8 | | | |
+| 5 | MCP 서버 관리 페이지 | 5 | | | |
+| 6 | Workflow 관리 페이지 | 11 | | | |
+| 7 | 대시보드 페이지 | 10 | | | |
+| 8 | 실행 상세 페이지 | 16 | | | |
+| 9 | 에이전트 세션 페이지 | 13 | | | |
+| 10 | 유틸리티/마무리 | 4 | | | |
+
+## 완료 조건
+
+모든 113개 체크리스트 항목이 통과하면 아래를 출력하라:
+
+<promise>FRONTEND_IMPLEMENTED</promise>

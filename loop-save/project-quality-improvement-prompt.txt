@@ -1,0 +1,382 @@
+프로젝트 평가에서 도출된 백엔드/프론트엔드 품질 개선 사항을 일괄 수정한다.
+도메인 엔티티/밸류오브젝트의 비즈니스 로직은 수정하지 않는다.
+flow-backend/CLAUDE.md와 flow-front/CLAUDE.md의 모든 규칙을 준수한다.
+
+수정할 항목 목록:
+  [백엔드 P0]
+  1. SendQueryUseCase.test.ts 테스트 3건 실패 — mock 생성자가 실제 UseCase 시그니처(5개 의존성)와 불일치
+  2. ESLint no-explicit-any 규칙 warn→error 변경 및 기존 any 제거
+  3. WorkflowModule↔WorkflowRuntimeModule forwardRef() 순환 참조 해소
+  [백엔드 P1]
+  4. console.log/console.error → NestJS Logger 전환 (10+ 파일)
+  5. 컨트롤러 타입 단언(as WorkflowId 등) → 파싱 파이프 도입
+  6. BadRequestException → 도메인/애플리케이션 에러로 통일
+  [프론트엔드 P0]
+  7. Vitest 설치 및 유틸/훅 단위 테스트 작성
+  [프론트엔드 P1]
+  8. React Error Boundary + QueryErrorResetBoundary 도입
+  9. 스켈레톤 로더 컴포넌트 추가 (페이지 로딩 UX 개선)
+
+아래 9개 Phase를 순서대로 진행한다.
+각 Phase 완료 후 반드시 아래 검증을 실행한다. 검증 실패 시 수정 후 다시 검증한다. 검증 통과 후 다음 Phase로 진행한다.
+  백엔드 검증: cd flow-backend && npm run typecheck && npm run test && npm run lint
+  프론트엔드 검증: cd flow-front && npx tsc -b && npm run lint && npm run build
+각 Phase 완료 후 Playwright MCP를 통해 localhost:5173에 접속하여 실제 화면을 확인하고 문제가 있으면 즉시 수정한다.
+
+===================================================================
+===== 백엔드 P0 ===================================================
+===================================================================
+
+----- Phase 1 SendQueryUseCase 테스트 수정 -----
+
+핵심 파일:
+  - flow-backend/tests/unit/application/workflow-runtime/SendQueryUseCase.test.ts
+참조할 코드 (읽기만, 수정하지 않음):
+  - flow-backend/src/workflow-runtime/application/use-cases/send-query-use-case.ts
+    (생성자 순서: workExecutionRepository, reportRepository, agentService, eventPublisher, fileSystem)
+  - flow-backend/src/workflow-runtime/domain/ports/report-repository.ts (ReportRepository 인터페이스)
+  - flow-backend/src/workflow-runtime/domain/ports/file-system.ts (FileSystem 인터페이스)
+  - flow-backend/src/common/ports/agent-service.ts (AgentService 추상 클래스)
+
+1-1. createMocks() 함수에 누락된 mock 2개 추가
+     현재 mock은 workExecutionRepository, agentService, eventPublisher만 생성한다.
+     실제 SendQueryUseCase 생성자는 5개 의존성:
+       1. workExecutionRepository: WorkExecutionRepository
+       2. reportRepository: ReportRepository
+       3. agentService: AgentService
+       4. eventPublisher: EventPublisher
+       5. fileSystem: FileSystem
+     ReportRepository와 FileSystem의 실제 인터페이스를 먼저 읽고 메서드를 정확히 맞춰 mock을 생성한다.
+     return 객체에 reportRepository, fileSystem을 포함한다.
+
+1-2. createUseCase() 함수에서 모든 의존성을 올바른 순서로 전달
+     현재:
+       new SendQueryUseCase(
+         mocks.workExecutionRepository as never,
+         mocks.agentService as never,
+         mocks.eventPublisher as never,
+       )
+     수정:
+       new SendQueryUseCase(
+         mocks.workExecutionRepository as never,
+         mocks.reportRepository as never,
+         mocks.agentService as never,
+         mocks.eventPublisher as never,
+         mocks.fileSystem as never,
+       )
+
+1-3. 'sends query and returns result' 테스트에 reportRepository 미호출 assertion 추가
+       expect(mocks.reportRepository.findById).not.toHaveBeenCalled();
+
+1-4. 검증 실행: cd flow-backend && npm run typecheck && npm run test && npm run lint
+     SendQueryUseCase.test.ts의 3개 테스트가 모두 통과하는지 확인한다.
+
+----- Phase 2 ESLint no-explicit-any 강화 -----
+
+핵심 파일:
+  - flow-backend/eslint.config.js (line 16)
+
+2-1. eslint.config.js 규칙 변경
+     '@typescript-eslint/no-explicit-any': 'warn' → 'error'
+
+2-2. npm run lint 실행하여 에러 위치 확인 후 수정
+     수정 전략:
+       - 함수 파라미터의 any → unknown + 타입 가드 또는 구체적 타입
+       - catch 블록 → error: unknown
+       - Record<string, any> → Record<string, unknown> 또는 구체적 타입
+       - 외부 라이브러리 충돌 시에만 eslint-disable-next-line + 사유 주석
+
+2-3. 검증 실행: cd flow-backend && npm run typecheck && npm run test && npm run lint
+
+----- Phase 3 모듈 순환 참조 해소 -----
+
+핵심 파일:
+  - flow-backend/src/workflow/presentation/workflow.module.ts (line 21: forwardRef(() => WorkflowRuntimeModule))
+  - flow-backend/src/workflow-runtime/presentation/workflow-runtime.module.ts (line 65: forwardRef(() => WorkflowModule))
+참조할 코드 (읽기만):
+  - flow-backend/src/common/ports/index.ts (WorkflowRunActiveChecker, WorkflowConfigReader)
+  - flow-backend/src/common/presentation/shared.module.ts
+  - flow-backend/src/workflow-runtime/infra/workflow-run-active-checker-impl.ts
+  - flow-backend/src/workflow/infra/workflow-config-reader-impl.ts
+
+3-1. 순환 참조 원인 파악
+     WorkflowModule → WorkflowRuntimeModule: WorkflowRunActiveChecker 필요 (삭제 시 활성 런 체크)
+     WorkflowRuntimeModule → WorkflowModule: WorkflowConfigReader 필요 (런 시작 시 워크플로우 설정 읽기)
+
+3-2. 공유 포트 모듈 추출
+     새 모듈 flow-backend/src/common/presentation/workflow-query.module.ts를 생성한다.
+     이 모듈이 WorkflowRunActiveChecker와 WorkflowConfigReader의 구현체를 각각 제공한다.
+     필요한 Repository들(WorkflowRepository, WorkflowRunRepository)도 이 모듈에서 제공하거나,
+     각 feature 모듈에서 Repository를 export하여 WorkflowQueryModule이 import하도록 한다.
+
+     또는 더 단순한 방법: 각 모듈이 자신의 포트 구현체를 exports하고, 상대 모듈 대신 직접 import하는 구조.
+     - WorkflowModule: WorkflowConfigReader를 exports (이미 하고 있음)
+     - WorkflowRuntimeModule: WorkflowRunActiveChecker를 exports (이미 하고 있음)
+     양쪽 Module의 exports를 분리된 포트 전용 모듈로 옮겨서 순환을 끊는다.
+
+3-3. forwardRef() 완전 제거 확인
+     두 모듈 파일에서 forwardRef import와 사용이 모두 제거되었는지 확인한다.
+
+3-4. 검증 실행: cd flow-backend && npm run typecheck && npm run test && npm run lint
+
+===================================================================
+===== 백엔드 P1 ===================================================
+===================================================================
+
+----- Phase 4 console.log → NestJS Logger 전환 -----
+
+핵심 파일 (console.log/console.error 사용 위치):
+  - flow-backend/src/agent/infra/claude-agent-client.ts (lines 60, 86, 103, 123, 152, 177)
+  - flow-backend/src/agent/application/agent-log-emitter.ts (lines 24, 31, 49)
+  - flow-backend/src/workflow-runtime/application/event-handlers/work-execution-started-handler.ts (lines 37, 47, 51, 57, 62, 66)
+  - flow-backend/src/workflow-runtime/application/event-handlers/query-responded-handler.ts (lines 26, 29, 32, 34, 36, 38, 41, 43, 44)
+  - flow-backend/src/workflow-runtime/application/event-handlers/workflow-run-started-handler.ts (lines 15, 17, 18)
+  - flow-backend/src/workflow-runtime/application/event-handlers/report-generated-handler.ts (lines 17, 22, 25, 27, 28)
+  - flow-backend/src/workflow-runtime/application/use-cases/cleanup-workspaces-use-case.ts (line 60)
+  - flow-backend/src/workflow-runtime/application/use-cases/recover-orphaned-runs-use-case.ts (line 23)
+  - flow-backend/src/workflow-runtime/presentation/workflow-runtime.module.ts (lines 173, 180)
+  - flow-backend/src/common/infra/persistent-event-publisher.ts (line 44)
+
+4-1. 각 클래스에 NestJS Logger 인스턴스 추가
+     import { Logger } from '@nestjs/common';
+     private readonly logger = new Logger(ClassName.name);
+     (또는 생성자 주입이 아닌 static name 사용)
+
+4-2. console.log → this.logger.log 변환
+     console.error → this.logger.error 변환
+     console.warn → this.logger.warn 변환
+     로그 메시지에서 기존 [PREFIX] 패턴은 NestJS Logger의 context로 대체한다:
+       예: console.log('[AGENT-CLIENT] start()') → this.logger.log('start()')
+       Logger context가 'ClaudeAgentClient'이므로 자동으로 [ClaudeAgentClient] 접두사가 붙는다.
+
+4-3. Module 파일의 void ... .catch() 패턴은 Logger로 변환
+     workflow-runtime.module.ts lines 172-182:
+       console.error('[RECOVER] ...') → this.logger.error('Failed to recover orphaned runs', err)
+
+4-4. 검증 실행: cd flow-backend && npm run typecheck && npm run test && npm run lint
+
+----- Phase 5 컨트롤러 타입 단언 → Branded ID 파싱 파이프 -----
+
+핵심 파일:
+  - flow-backend/src/workflow/presentation/workflow.controller.ts (as WorkflowId: lines 33, 54, 65, 72, 79; as GitId: 83; as McpServerId: 86)
+  - flow-backend/src/workflow-runtime/presentation/workflow-runtime.controller.ts (as WorkflowId, WorkflowRunId, WorkExecutionId, GitId, McpServerId: 15+ 위치)
+  - flow-backend/src/git/presentation/git.controller.ts (as GitId: lines 28, 50)
+  - flow-backend/src/mcp/presentation/mcp.controller.ts (as McpServerId: lines 32, 62)
+  - flow-backend/src/agent/presentation/agent.controller.ts (as WorkExecutionId, WorkflowRunId: 5+ 위치)
+  - flow-backend/src/workflow-runtime/presentation/report.controller.ts (as WorkExecutionId: line 16)
+
+5-1. BrandedIdPipe 생성
+     flow-backend/src/common/presentation/pipes/branded-id.pipe.ts를 생성한다.
+     NestJS PipeTransform 구현:
+       - 입력 string을 받아 해당 ID 팩토리의 create()로 변환
+       - 유효하지 않은 UUID면 BadRequestException 대신 ApplicationError throw
+     사용법: @Param('id', new BrandedIdPipe(WorkflowId)) id: WorkflowId
+
+     또는 더 단순한 방법: 각 ID 타입별 파이프를 생성
+       ParseWorkflowIdPipe, ParseGitIdPipe, ParseMcpServerIdPipe, ParseWorkflowRunIdPipe, ParseWorkExecutionIdPipe
+     각 파이프는 ID 팩토리의 create() 또는 validate() 함수를 사용한다.
+     Branded Type 팩토리에 validate 함수가 없으면 생성한다 (common/ids/shared-ids.ts 확인).
+
+5-2. 모든 컨트롤러에서 as TypeId 단언을 파이프로 교체
+     Before: @Param('id') id: string → id as WorkflowId
+     After:  @Param('id', ParseWorkflowIdPipe) id: WorkflowId
+     모든 컨트롤러의 모든 as XxxId 사용을 파이프로 교체한다.
+
+5-3. DTO 내부의 string → ID 변환도 정리
+     Controller의 private 메서드(toGitRef, toMcpServerRef 등)에서 dto.gitId as GitId 패턴도
+     ID 팩토리의 create()로 교체한다:
+       Before: dto.gitId as GitId
+       After:  GitId.create(dto.gitId)
+     create()가 없으면 기존 패턴을 유지한다.
+
+5-4. 검증 실행: cd flow-backend && npm run typecheck && npm run test && npm run lint
+
+----- Phase 6 BadRequestException → 도메인 에러 통일 -----
+
+핵심 파일:
+  - flow-backend/src/workflow/presentation/workflow.controller.ts (line 90: BadRequestException in toWorkDefinition)
+참조:
+  - flow-backend/src/common/presentation/filters/domain-exception.filter.ts
+  - flow-backend/src/common/presentation/filters/application-exception.filter.ts
+
+6-1. workflow.controller.ts의 BadRequestException 제거
+     line 90의 throw new BadRequestException('workDefinitions[].taskDefinitions is required...')를
+     적절한 도메인/애플리케이션 에러로 교체한다.
+     입력 검증은 class-validator가 담당하므로, DTO에서 이미 @IsArray + @ValidateNested로 검증된다.
+     따라서 수동 배열 체크 자체가 불필요할 수 있다:
+       if (!Array.isArray(dto.taskDefinitions)) 체크를 제거하거나,
+       남겨야 한다면 ApplicationError('INVALID_INPUT', '...')로 교체한다.
+
+6-2. BadRequestException import 제거 (사용처가 없어지면)
+     workflow.controller.ts line 1에서 BadRequestException import를 제거한다.
+
+6-3. 다른 컨트롤러에서도 BadRequestException 사용이 없는지 전체 검색하여 확인한다.
+     발견되면 동일하게 도메인/애플리케이션 에러로 교체한다.
+
+6-4. 검증 실행: cd flow-backend && npm run typecheck && npm run test && npm run lint
+
+===================================================================
+===== 프론트엔드 P0 ===============================================
+===================================================================
+
+----- Phase 7 Vitest 설치 및 단위 테스트 작성 -----
+
+핵심 파일 (신규 생성):
+  - flow-front/vitest.config.ts
+  - flow-front/tests/unit/lib/format.test.ts
+  - flow-front/tests/unit/lib/query-keys.test.ts
+  - flow-front/tests/unit/lib/constants.test.ts
+참조할 코드:
+  - flow-front/src/lib/format.ts (formatDate, formatRunStatus, formatWorkflowStatus)
+  - flow-front/src/lib/query-keys.ts (queryKeys 팩토리)
+  - flow-front/src/lib/constants.ts (RUN_STATUS_COLOR, RUN_STATUS_LABEL 등)
+  - flow-front/src/api/types.ts (WorkflowRunStatus, WorkflowStatus 타입)
+  - flow-front/package.json
+  - flow-front/tsconfig.json, tsconfig.app.json
+  - flow-front/vite.config.ts (path alias 설정)
+
+7-1. Vitest 설치
+     cd flow-front && npm install -D vitest @vitest/coverage-v8
+
+7-2. vitest.config.ts 생성
+     flow-front/vitest.config.ts:
+       import { defineConfig } from 'vitest/config';
+       import path from 'path';
+       export default defineConfig({
+         test: {
+           globals: true,
+           environment: 'node',
+           include: ['tests/**/*.test.ts', 'tests/**/*.test.tsx'],
+         },
+         resolve: {
+           alias: {
+             '@': path.resolve(__dirname, './src'),
+           },
+         },
+       });
+
+7-3. package.json에 test 스크립트 추가
+     "test": "vitest run",
+     "test:watch": "vitest"
+
+7-4. format.ts 단위 테스트 작성
+     flow-front/tests/unit/lib/format.test.ts:
+     - formatDate: ISO 문자열 → ko-KR 형식 출력 확인, undefined/null 입력 시 fallback 확인
+     - formatRunStatus: 모든 WorkflowRunStatus 값에 대해 한국어 라벨 반환 확인
+     - formatWorkflowStatus: 모든 WorkflowStatus 값에 대해 한국어 라벨 반환 확인
+
+7-5. query-keys.ts 단위 테스트 작성
+     flow-front/tests/unit/lib/query-keys.test.ts:
+     - queryKeys.workflows.all이 ['workflows']인지 확인
+     - queryKeys.workflows.detail('abc')이 ['workflows', 'abc']인지 확인
+     - 각 리소스(gits, mcpServers, workflowRuns, agentSessions, agentLogs)의 키 구조 확인
+
+7-6. constants.ts 단위 테스트 작성
+     flow-front/tests/unit/lib/constants.test.ts:
+     - RUN_STATUS_LABEL의 모든 상태가 정의되어 있는지 확인
+     - WORKFLOW_STATUS_LABEL의 모든 상태가 정의되어 있는지 확인
+     - MODEL_OPTIONS가 비어있지 않은지 확인
+
+7-7. 검증 실행
+     cd flow-front && npm run test
+     cd flow-front && npx tsc -b && npm run lint && npm run build
+
+===================================================================
+===== 프론트엔드 P1 ===============================================
+===================================================================
+
+----- Phase 8 Error Boundary 도입 -----
+
+핵심 파일 (신규 생성):
+  - flow-front/src/components/ErrorBoundary.tsx
+  - flow-front/src/components/ErrorFallback.tsx
+수정할 파일:
+  - flow-front/src/App.tsx (라우터에 Error Boundary 래핑)
+참조:
+  - flow-front/src/components/ui/button.tsx (기존 Button 컴포넌트)
+  - flow-front/src/components/layout/AppLayout.tsx
+
+8-1. ErrorFallback 컴포넌트 생성
+     flow-front/src/components/ErrorFallback.tsx:
+     props: { error: Error; resetErrorBoundary: () => void }
+     UI:
+       - 중앙 정렬 카드
+       - "문제가 발생했습니다" 제목
+       - error.message 표시
+       - "다시 시도" 버튼 (resetErrorBoundary 호출)
+       - "홈으로 이동" 버튼 (navigate('/'))
+     Tailwind + 기존 Button 컴포넌트 사용
+
+8-2. ErrorBoundary 클래스 컴포넌트 생성
+     flow-front/src/components/ErrorBoundary.tsx:
+     React.Component 기반 Error Boundary 구현:
+       - state: { hasError: boolean; error: Error | null }
+       - static getDerivedStateFromError(error: Error)
+       - componentDidCatch(error, errorInfo) — 콘솔에 에러 로깅
+       - render: hasError면 fallback 렌더링, 아니면 children 렌더링
+     props: { children: React.ReactNode; fallback?: React.ComponentType<{ error: Error; resetErrorBoundary: () => void }> }
+
+8-3. App.tsx에 Error Boundary 적용
+     React Query의 QueryErrorResetBoundary와 함께 사용:
+       import { QueryErrorResetBoundary } from '@tanstack/react-query';
+     라우터의 최상위(AppLayout 바깥 또는 안쪽)에 래핑:
+       <QueryErrorResetBoundary>
+         {({ reset }) => (
+           <ErrorBoundary onReset={reset} fallback={ErrorFallback}>
+             <Routes>...</Routes>
+           </ErrorBoundary>
+         )}
+       </QueryErrorResetBoundary>
+     ErrorBoundary에 onReset prop을 추가하여 reset 연결한다.
+
+8-4. 검증 실행: cd flow-front && npx tsc -b && npm run lint && npm run build
+
+----- Phase 9 스켈레톤 로더 및 통합 검증 -----
+
+핵심 파일 (신규 생성):
+  - flow-front/src/components/ui/skeleton.tsx
+수정할 파일:
+  - flow-front/src/pages/WorkflowListPage.tsx (isLoading → 스켈레톤)
+  - flow-front/src/pages/DashboardPage.tsx (isLoading → 스켈레톤)
+
+9-1. Skeleton 기본 컴포넌트 생성
+     flow-front/src/components/ui/skeleton.tsx:
+     shadcn/ui 스타일의 Skeleton 컴포넌트:
+       interface SkeletonProps extends React.HTMLAttributes<HTMLDivElement> {}
+       export function Skeleton({ className, ...props }: SkeletonProps) {
+         return <div className={cn('animate-pulse rounded-md bg-muted', className)} {...props} />;
+       }
+
+9-2. TableSkeleton 컴포넌트 생성
+     flow-front/src/components/ui/skeleton.tsx 내에 추가:
+       interface TableSkeletonProps { rows?: number; columns?: number }
+       export function TableSkeleton({ rows = 5, columns = 4 }: TableSkeletonProps)
+       테이블 헤더 + rows개의 행을 Skeleton으로 렌더링한다.
+
+9-3. WorkflowListPage 로딩 상태 개선
+     현재: if (listQuery.isLoading) return <LoadingSpinner />;
+     변경: if (listQuery.isLoading) return <TableSkeleton rows={5} columns={4} />;
+     PageHeader는 그대로 표시하고 테이블 영역만 스켈레톤으로 대체한다.
+
+9-4. DashboardPage 로딩 상태 개선
+     대시보드의 각 섹션(요약 카드, 최근 실행 목록)을 개별 스켈레톤으로 대체한다.
+     isLoading일 때 카드 영역에는 Skeleton 박스를, 리스트 영역에는 TableSkeleton을 표시한다.
+
+9-5. 프론트엔드 검증 실행: cd flow-front && npx tsc -b && npm run lint && npm run build
+
+9-6. Playwright MCP 통합 검증
+     localhost:5173에 접속하여 다음 시나리오를 확인한다:
+     시나리오 A — 에러 바운더리 동작:
+       브라우저 콘솔에서 에러를 유발하거나, 존재하지 않는 라우트 접속 시 에러 화면이 정상 표시되는지 확인
+     시나리오 B — 스켈레톤 로더:
+       워크플로우 목록 페이지 접속 시 데이터 로딩 중 스켈레톤이 표시되는지 확인
+       대시보드 페이지 접속 시 스켈레톤이 표시되는지 확인
+     시나리오 C — 기존 기능 정상 동작:
+       워크플로우 목록 조회, 상세 보기, 생성/수정/삭제가 정상 동작하는지 확인
+       Git 관리, MCP 서버 관리 페이지가 정상 동작하는지 확인
+
+9-7. 최종 검증 실행:
+     cd flow-backend && npm run typecheck && npm run test && npm run lint
+     cd flow-front && npm run test && npx tsc -b && npm run lint && npm run build
+
+모든 Phase가 완료되고 전체 시나리오 검증이 통과하면 PROJECT QUALITY IMPROVEMENT COMPLETE 를 출력한다.

@@ -1,0 +1,150 @@
+# 작업: 프론트엔드 설계 문서 검증 (Ralph Loop)
+
+## 목표
+
+`.front-design/` 디렉토리의 프론트엔드 설계 문서가 백엔드 실제 동작과 일치하는지 검증하고, 불일치가 발견되면 설계 문서를 수정한다.
+**모든 체크리스트 항목이 통과할 때까지 반복한다.**
+
+## 수정 허용 범위
+
+- **수정 가능:** `.front-design/` 디렉토리 내 파일만
+- **수정 금지:** 백엔드 소스 코드, 테스트 코드
+
+## 검증 방법
+
+각 체크리스트 항목에 대해:
+1. **백엔드 소스**(엔티티, 유스케이스, 컨트롤러)를 읽어 실제 동작을 파악한다
+2. **매뉴얼 테스트**(`tests/manual/runtime-test.prompt.md`)에서 기대 동작을 확인한다
+3. **설계 문서**의 해당 섹션이 위 내용과 일치하는지 검증한다
+4. 불일치 시 설계 문서를 수정한다
+
+## 체크리스트
+
+### 1. Git/MCP 삭제 동작 — 차단 방식
+
+**검증 대상:** `git-management.md`, `mcp-server-management.md`
+
+백엔드는 워크플로우가 참조 중인 Git/MCP 서버 삭제 시 **400/409 에러로 차단**한다 (캐스케이딩 삭제가 아님).
+
+- [ ] `git-management.md`: 삭제 다이얼로그가 `refCount > 0`일 때 **삭제 차단 UI**(삭제 버튼 없음/비활성화, "참조 제거 후 삭제" 안내)를 표시하는가
+- [ ] `git-management.md`: 삭제 다이얼로그가 `refCount === 0`일 때만 삭제 확인 UI를 표시하는가
+- [ ] `git-management.md`: 와이어프레임에 차단 상태와 허용 상태 두 가지가 모두 있는가
+- [ ] `git-management.md`: 인터랙션 흐름에 "참조 있음 → 차단" / "참조 없음 → 삭제 허용" 분기가 있는가
+- [ ] `mcp-server-management.md`: 동일한 차단/허용 분기 패턴이 적용되어 있는가
+- [ ] `mcp-server-management.md`: 와이어프레임에 차단 다이얼로그와 허용 다이얼로그가 모두 있는가
+
+### 2. AWAITING 상태 — 모든 관련 페이지에 반영
+
+**검증 대상:** `dashboard.md`, `workflow-run.md`, `README.md`
+
+백엔드의 WorkflowRun 상태는 6종: `INITIALIZED | RUNNING | PAUSED | AWAITING | COMPLETED | CANCELLED`.
+`AWAITING`은 `pauseAfter` 설정에 의해 Work 완료 후 자동 전이되는 상태이다.
+
+- [ ] `dashboard.md`: 요약 카드에 AWAITING("대기 중") 카드가 포함되어 있는가
+- [ ] `dashboard.md`: 와이어프레임에 AWAITING 상태 행 예시가 있는가
+- [ ] `dashboard.md`: ActionButtons에서 AWAITING 상태의 액션(ResumeButton, CancelButton)이 정의되어 있는가
+- [ ] `workflow-run.md`: PAUSED와 AWAITING에서 resume 동작 차이가 명시되어 있는가
+  - PAUSED resume → 체크포인트 복원 + 현재 Work 재실행
+  - AWAITING resume → 다음 Work부터 실행 계속 (복원 없음)
+- [ ] `workflow-run.md`: ResumeButton에 PAUSED="재개", AWAITING="계속" 라벨 구분이 있는가
+- [ ] `workflow-run.md`: StepIcon에 🟠(AWAITING) 아이콘이 정의되어 있는가
+- [ ] `workflow-run.md`: 폴링 전략에서 RUNNING만 폴링하고 AWAITING은 폴링 불필요로 처리하는가
+- [ ] `workflow-run.md`: CheckpointSection이 PAUSED와 AWAITING 모두에서 표시되는가
+- [ ] `README.md`: `RunSummary` 타입에 `awaiting: number` 필드가 있는가
+- [ ] `README.md`: `WorkflowRunStatus` 타입에 `'AWAITING'`이 포함되어 있는가
+
+### 3. Workflow 상태 — DRAFT/ACTIVE 라이프사이클
+
+**검증 대상:** `workflow-management.md`, `README.md`
+
+백엔드에서 Workflow는 `DRAFT` 상태로 생성되며, `activate` 후에만 실행 가능하다. `deactivate`해야 수정/삭제 가능하다.
+
+- [ ] `workflow-management.md`: 목록에 Status 컬럼(DRAFT/ACTIVE)이 표시되는가
+- [ ] `workflow-management.md`: RowActions가 DRAFT/ACTIVE 상태에 따라 분기되는가
+  - DRAFT: 수정, 활성화, 삭제
+  - ACTIVE: 실행, 비활성화
+- [ ] `workflow-management.md`: API 호출 테이블에 `POST /workflows/:id/activate`와 `POST /workflows/:id/deactivate`가 있는가
+- [ ] `workflow-management.md`: 활성화/비활성화 뮤테이션이 상태 관리 섹션에 정의되어 있는가
+- [ ] `workflow-management.md`: 활성화/비활성화/실행/삭제 인터랙션 흐름이 각각 설명되어 있는가
+- [ ] `workflow-management.md`: ACTIVE 상태에서 수정/삭제 불가 주의사항이 명시되어 있는가
+- [ ] `README.md`: `WorkflowListItem`에 `status: WorkflowStatus` 필드가 있는가
+- [ ] `README.md`: `WorkflowStatus` 타입이 `'DRAFT' | 'ACTIVE'`로 정의되어 있는가
+
+### 4. Work Node CRUD — 런타임 중 편집 UI
+
+**검증 대상:** `workflow-run.md`
+
+백엔드는 PAUSED/AWAITING 상태에서 Work Node의 수정(PUT), 추가(POST), 삭제(DELETE)를 지원한다.
+
+- [ ] `workflow-run.md`: WorkNodeEditorSection 컴포넌트가 `PAUSED | AWAITING` 상태에서만 표시되는가
+- [ ] `workflow-run.md`: 편집 가능 범위 규칙이 명시되어 있는가 (currentWorkIndex 기준)
+- [ ] `workflow-run.md`: WorkNodeEditDialog(수정), WorkNodeAddDialog(추가), DeleteConfirmDialog(삭제) 컴포넌트가 있는가
+- [ ] `workflow-run.md`: API 테이블에 Work Node CRUD 3개 엔드포인트가 있는가
+  - `PUT /workflow-runs/:id/work-nodes/:sequence`
+  - `POST /workflow-runs/:id/work-nodes`
+  - `DELETE /workflow-runs/:id/work-nodes/:sequence`
+- [ ] `workflow-run.md`: 상태 관리에 editWorkNodeMutation, addWorkNodeMutation, deleteWorkNodeMutation이 있는가
+- [ ] `workflow-run.md`: 인터랙션 흐름에 Work Node 편집/추가/삭제 흐름이 설명되어 있는가
+
+### 5. branchStrategy 타입 — 문자열
+
+**검증 대상:** `workflow-management.md`, `README.md`
+
+백엔드의 `branchStrategy`는 단순 `string`이다 (객체 `{ workBranch: string }`가 아님).
+
+- [ ] `workflow-management.md`: 폼에서 `branchStrategy`가 단순 TextField로 처리되는가 (객체 구조가 아닌)
+- [ ] `workflow-management.md`: Zod 스키마에서 `branchStrategy`가 `z.string()`인가
+- [ ] `README.md`: `WorkflowListItem`의 `branchStrategy`가 `string`으로 정의되어 있는가 (주석에 예시: `"feature/PROJ-123"`)
+
+### 6. Agent Session ID 해석 — workExecutionId 기반
+
+**검증 대상:** `agent-session.md`
+
+백엔드의 에이전트 세션 API는 `workExecutionId`를 path param으로 받는다 (AgentSessionId가 아님). 프론트엔드는 `runId → workExecutionId` 변환이 필요하다.
+
+- [ ] `agent-session.md`: 3단계 ID 해석 흐름이 설명되어 있는가 (runId → runDetail → workExecutionId)
+- [ ] `agent-session.md`: 컴포넌트 트리에 Loading/NoWorkExecution/NoSession 분기가 있는가
+- [ ] `agent-session.md`: 상태 관리에 runDetail 쿼리 → workExecutionId 추출 → agentSession 쿼리 체인이 있는가
+- [ ] `agent-session.md`: API 호출 테이블의 경로가 `:workExecutionId`를 사용하는가 (`:agentSessionId`가 아닌)
+- [ ] `agent-session.md`: 인터랙션 흐름에 workExecutionId 해석 단계가 포함되어 있는가
+
+### 7. README 타입 정합성
+
+**검증 대상:** `README.md`
+
+README의 타입 정의가 백엔드 엔티티/DTO 구조와 일치해야 한다.
+
+- [ ] `README.md`: `WorkflowRunDetail`에 `totalWorkCount`, `workExecutionIds`, `workNodeConfigs` 필드가 있는가
+- [ ] `README.md`: `WorkNodeConfigSummary` 인터페이스가 정의되어 있는가 (id, sequence, model, taskCount, pauseAfter)
+- [ ] `README.md`: `WorkExecutionDetail`, `TaskExecutionDetail` 인터페이스가 정의되어 있는가
+- [ ] `README.md`: 이미 존재하는 API(`GET /workflow-runs/:id`, `GET /workflow-runs/:id/checkpoints`)와 추가 필요 API가 구분되어 있는가
+- [ ] `README.md`: `WorkflowRunDetail`에 `restoredToCheckpoint`, `cancelledAtWorkIndex`, `cancellationReason` 필드가 있는가
+
+## 반복 절차
+
+매 반복(iteration)에서:
+
+1. 위 체크리스트를 **순서대로** 검증한다
+2. 각 항목에 대해 해당 설계 문서와 백엔드 소스를 비교한다
+3. 불일치가 발견되면 설계 문서를 수정한다
+4. 모든 항목이 통과하면 아래 결과 테이블을 출력하고 완료 신호를 보낸다
+
+## 결과 보고
+
+모든 검증이 완료되면 아래 형식으로 보고하라:
+
+| # | 카테고리 | 항목 수 | 통과 | 수정 필요 | 수정 내용 요약 |
+|---|----------|---------|------|-----------|----------------|
+| 1 | Git/MCP 삭제 차단 | 6 | | | |
+| 2 | AWAITING 상태 | 10 | | | |
+| 3 | DRAFT/ACTIVE 라이프사이클 | 8 | | | |
+| 4 | Work Node CRUD | 6 | | | |
+| 5 | branchStrategy 타입 | 3 | | | |
+| 6 | Agent Session ID 해석 | 5 | | | |
+| 7 | README 타입 정합성 | 5 | | | |
+
+## 완료 조건
+
+모든 43개 체크리스트 항목이 통과하면 아래를 출력하라:
+
+<promise>FRONT_DESIGN_VERIFIED</promise>

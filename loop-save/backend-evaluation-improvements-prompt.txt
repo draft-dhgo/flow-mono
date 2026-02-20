@@ -1,0 +1,376 @@
+백엔드 프로젝트 평가에서 도출된 아키텍처/테스트 품질 개선 사항을 수정한다.
+비즈니스 로직과 API 동작은 변경하지 않는다.
+flow-backend/CLAUDE.md의 모든 규칙을 준수한다.
+
+수정할 항목 목록:
+  [P0 - 아키텍처]
+  1. mcp-gateway 크로스 도메인 임포트 위반 해소 — Facade 패턴 도입
+  [P0 - 테스트 커버리지]
+  2. 이벤트 핸들러 단위 테스트 보강 (7개 핸들러 중 5개 누락)
+  3. 쿼리 유스케이스 단위 테스트 신규 작성
+  4. 팩토리 단위 테스트 보강
+  [P1 - 에러 처리]
+  5. 이벤트 핸들러 사일런트 에러 캐치 개선 — 로깅 추가
+  [P1 - API 문서]
+  6. Swagger/OpenAPI 문서 자동 생성 설정
+
+아래 6개 Phase를 순서대로 진행한다.
+각 Phase 완료 후 반드시 아래 검증을 실행한다. 검증 실패 시 수정 후 다시 검증한다. 검증 통과 후 다음 Phase로 진행한다.
+  백엔드 검증: cd flow-backend && npm run typecheck && npm run test && npm run lint
+
+
+----- Phase 1 mcp-gateway 아키텍처 위반 해소 — Facade 패턴 도입 -----
+
+핵심 파일:
+  - flow-backend/src/mcp-gateway/application/tool-registrars/workflow-tools.ts — 수정
+  - flow-backend/src/mcp-gateway/application/tool-registrars/workflow-run-tools.ts — 수정
+  - flow-backend/src/mcp-gateway/application/tool-registrars/git-tools.ts — 수정
+  - flow-backend/src/mcp-gateway/application/tool-registrars/mcp-server-tools.ts — 수정
+  - flow-backend/src/mcp-gateway/presentation/mcp-gateway.module.ts — 수정
+참조할 코드 — 읽기만, 수정하지 않음:
+  - flow-backend/tests/arch/architecture.test.ts — 아키텍처 규칙 확인
+  - flow-backend/src/workflow/presentation/workflow.module.ts — 모듈 exports 패턴
+  - flow-backend/src/workflow-runtime/presentation/workflow-runtime.module.ts — 모듈 exports 패턴
+
+현재 문제:
+  mcp-gateway의 tool-registrar 파일들이 @workflow, @workflow-runtime, @git, @mcp 도메인의
+  유스케이스와 리포지토리를 직접 임포트한다. 이는 architecture.test.ts의
+  "application inter-feature import prohibition" 규칙을 위반하여 테스트 1건이 실패한다.
+
+해결 전략:
+  각 도메인에 Facade 서비스를 생성하고, mcp-gateway는 Facade만 의존하도록 변경한다.
+  Facade는 @common/ports에 인터페이스로 정의하여 아키텍처 규칙을 준수한다.
+
+1-1. Facade 포트 인터페이스 생성
+     flow-backend/src/common/ports/workflow-facade.ts:
+
+     import type { WorkflowId } from '@common/ids/index.js';
+
+     export interface WorkflowListItem {
+       readonly id: WorkflowId;
+       readonly name: string;
+       readonly status: string;
+     }
+
+     export abstract class WorkflowFacade {
+       abstract list(): Promise<ReadonlyArray<WorkflowListItem>>;
+       abstract getById(id: WorkflowId): Promise<unknown>;
+       abstract create(params: Record<string, unknown>): Promise<{ workflowId: WorkflowId }>;
+       abstract update(id: WorkflowId, params: Record<string, unknown>): Promise<void>;
+       abstract delete(id: WorkflowId): Promise<void>;
+       abstract activate(id: WorkflowId): Promise<void>;
+       abstract deactivate(id: WorkflowId): Promise<void>;
+     }
+
+     참고: 실제 메서드 시그니처는 workflow-tools.ts에서 호출하는 유스케이스들의
+     execute 메서드를 확인하여 정확히 맞춘다.
+     반환 타입이 복잡하면 Facade 전용 DTO를 같은 파일에 정의한다.
+
+1-2. 나머지 Facade 포트 생성
+     flow-backend/src/common/ports/workflow-runtime-facade.ts:
+       WorkflowRuntimeFacade — 워크플로우 런 관련 조회/실행/제어 메서드
+       workflow-run-tools.ts에서 호출하는 모든 유스케이스/쿼리의 execute를 Facade 메서드로 래핑
+
+     flow-backend/src/common/ports/git-facade.ts:
+       GitFacade — Git 관련 CRUD 메서드
+       git-tools.ts에서 호출하는 모든 유스케이스/쿼리의 execute를 Facade 메서드로 래핑
+
+     flow-backend/src/common/ports/mcp-server-facade.ts:
+       McpServerFacade — MCP 서버 관련 CRUD 메서드
+       mcp-server-tools.ts에서 호출하는 모든 유스케이스/쿼리의 execute를 Facade 메서드로 래핑
+
+1-3. 각 도메인에 Facade 구현체 생성
+
+     flow-backend/src/workflow/application/workflow-facade-impl.ts:
+       @Injectable 데코레이터
+       생성자에서 기존 유스케이스와 쿼리를 주입받는다.
+       각 Facade 메서드는 대응하는 유스케이스/쿼리의 execute를 위임 호출한다.
+
+     flow-backend/src/workflow-runtime/application/workflow-runtime-facade-impl.ts:
+       동일 패턴으로 WorkflowRuntimeFacade 구현
+
+     flow-backend/src/git/application/git-facade-impl.ts:
+       동일 패턴으로 GitFacade 구현
+
+     flow-backend/src/mcp/application/mcp-server-facade-impl.ts:
+       동일 패턴으로 McpServerFacade 구현
+
+1-4. 각 도메인 모듈에서 Facade를 providers와 exports에 등록
+
+     workflow.module.ts:
+       providers에 추가:
+         { provide: WorkflowFacade, useClass: WorkflowFacadeImpl }
+       exports에 추가:
+         WorkflowFacade
+
+     workflow-runtime.module.ts:
+       providers에 추가:
+         { provide: WorkflowRuntimeFacade, useClass: WorkflowRuntimeFacadeImpl }
+       exports에 추가:
+         WorkflowRuntimeFacade
+
+     git.module.ts:
+       providers에 추가:
+         { provide: GitFacade, useClass: GitFacadeImpl }
+       exports에 추가:
+         GitFacade
+
+     mcp.module.ts:
+       providers에 추가:
+         { provide: McpServerFacade, useClass: McpServerFacadeImpl }
+       exports에 추가:
+         McpServerFacade
+
+1-5. mcp-gateway tool-registrar 파일 수정
+
+     workflow-tools.ts:
+       기존의 모든 @workflow 도메인 임포트 제거
+       WorkflowFacade를 @common/ports에서 임포트
+       생성자에서 개별 유스케이스/쿼리 대신 WorkflowFacade 하나만 주입
+       각 tool handler에서 facade 메서드 호출로 변경
+
+     workflow-run-tools.ts:
+       기존의 모든 @workflow-runtime 도메인 임포트 제거
+       WorkflowRuntimeFacade를 @common/ports에서 임포트
+       동일 패턴으로 변경
+
+     git-tools.ts:
+       기존의 모든 @git 도메인 임포트 제거
+       GitFacade를 @common/ports에서 임포트
+       동일 패턴으로 변경
+
+     mcp-server-tools.ts:
+       기존의 모든 @mcp 도메인 임포트 제거
+       McpServerFacade를 @common/ports에서 임포트
+       동일 패턴으로 변경
+
+1-6. mcp-gateway.module.ts 수정
+     imports에서 기존 도메인 모듈 유지 — Facade가 export되므로 사용 가능
+     providers에서 개별 유스케이스/쿼리 임포트 제거
+
+1-7. @common/ports/index.ts에 새 Facade 포트 export 추가
+
+1-8. 아키텍처 테스트 확인
+     npm run test 실행하여 architecture.test.ts의 모든 테스트가 통과하는지 확인한다.
+     특히 "should not have cross-feature application imports" 테스트가 통과해야 한다.
+     mcp-gateway의 application 레이어가 @common/ports만 임포트하는지 확인한다.
+
+1-9. 검증 실행: cd flow-backend && npm run typecheck && npm run test && npm run lint
+
+
+----- Phase 2 이벤트 핸들러 단위 테스트 보강 -----
+
+핵심 파일 — 테스트 대상:
+  - flow-backend/src/workflow-runtime/application/event-handlers/work-execution-started-handler.ts
+  - flow-backend/src/workflow-runtime/application/event-handlers/query-responded-handler.ts
+  - flow-backend/src/workflow-runtime/application/event-handlers/report-generated-handler.ts
+  - flow-backend/src/workflow-runtime/application/event-handlers/workflow-run-started-handler.ts
+  - flow-backend/src/workflow-runtime/application/event-handlers/workflow-deleted-handler.ts (workflow-runtime 내)
+참조할 코드:
+  - flow-backend/tests/unit/application/workflow/git-deleted-handler.test.ts — 기존 핸들러 테스트 패턴
+  - flow-backend/tests/unit/application/workflow/mcp-server-unregistered-handler.test.ts — 기존 핸들러 테스트 패턴
+
+테스트 작성 규칙:
+  기존 핸들러 테스트 패턴을 참조하여 동일한 스타일로 작성한다.
+  각 핸들러의 모든 의존성을 vi.fn으로 모킹한다.
+  성공 케이스와 에러 케이스를 모두 테스트한다.
+  핸들러가 올바른 리포지토리/서비스 메서드를 호출하는지 검증한다.
+
+2-1. WorkExecutionStartedHandler 테스트 생성
+     flow-backend/tests/unit/application/workflow-runtime/work-execution-started-handler.test.ts
+
+     먼저 핸들러 소스를 읽고 의존성과 로직을 파악한다.
+     테스트 케이스:
+       - 정상 처리: 이벤트 수신 시 적절한 서비스/리포지토리 호출 확인
+       - 에러 발생 시 예외가 전파되거나 로깅되는지 확인
+       - 의존 엔티티가 없는 경우의 처리 확인
+
+2-2. QueryRespondedHandler 테스트 생성
+     flow-backend/tests/unit/application/workflow-runtime/query-responded-handler.test.ts
+
+     동일 패턴으로 작성.
+     테스트 케이스:
+       - 정상 응답 처리
+       - 관련 엔티티가 없는 경우
+       - 에러 발생 시 처리
+
+2-3. ReportGeneratedHandler 테스트 생성
+     flow-backend/tests/unit/application/workflow-runtime/report-generated-handler.test.ts
+
+     동일 패턴으로 작성.
+
+2-4. WorkflowRunStartedHandler 테스트 생성
+     flow-backend/tests/unit/application/workflow-runtime/workflow-run-started-handler.test.ts
+
+     동일 패턴으로 작성.
+
+2-5. WorkflowDeletedHandler (workflow-runtime) 테스트 생성
+     flow-backend/tests/unit/application/workflow-runtime/workflow-deleted-handler.test.ts
+
+     동일 패턴으로 작성.
+     워크플로우 삭제 시 관련 런, 실행, 리포트, 체크포인트, 스페이스가
+     모두 정리되는지 검증한다.
+
+2-6. 검증 실행: cd flow-backend && npm run typecheck && npm run test && npm run lint
+
+
+----- Phase 3 쿼리 유스케이스 단위 테스트 신규 작성 -----
+
+핵심 파일 — 테스트 대상:
+  flow-backend/src/ 하위의 모든 application/queries/ 디렉토리 파일
+참조할 코드:
+  - flow-backend/tests/unit/application/ 하위 기존 유스케이스 테스트 — 패턴 참조
+
+먼저 모든 쿼리 파일을 검색한다:
+  flow-backend/src/**/application/queries/*.ts 패턴으로 glob 검색
+
+3-1. 각 쿼리 유스케이스의 소스를 읽고 의존성과 반환 구조를 파악한다.
+
+3-2. 각 쿼리별 테스트 파일 생성
+     경로 규칙: tests/unit/application/{feature}/{query-name}.test.ts
+
+     공통 테스트 케이스:
+       - 정상 조회: 리포지토리에서 데이터를 반환하면 올바른 형태로 매핑되는지 확인
+       - 존재하지 않는 엔티티 조회 시 적절한 에러가 발생하는지 확인 (null 반환 또는 NotFoundError)
+       - 빈 목록 조회 시 빈 배열 반환 확인 (리스트 쿼리)
+
+     각 쿼리별 특수 케이스:
+       - GetWorkflowQuery: 워크플로우 상세 정보가 모든 필드를 포함하는지 확인
+       - ListWorkflowsQuery: 전체 목록 반환 확인
+       - GetWorkflowRunQuery: 런 상세 정보 + 관련 데이터 포함 확인
+       - ListWorkflowRunsQuery: workflowId 필터링 동작 확인
+       - GetReportQuery: 리포트 조회 확인
+       - 기타 쿼리: 소스 코드를 읽고 적절한 테스트 케이스 도출
+
+3-3. 검증 실행: cd flow-backend && npm run typecheck && npm run test && npm run lint
+
+
+----- Phase 4 팩토리 단위 테스트 보강 -----
+
+핵심 파일 — 테스트 대상:
+  flow-backend/src/**/application/factories/*.ts 패턴으로 검색하여 테스트가 없는 팩토리 식별
+참조할 코드:
+  - flow-backend/tests/unit/application/ 하위 기존 팩토리 테스트
+
+4-1. 테스트가 없는 팩토리를 검색한다.
+     모든 팩토리 파일 목록과 기존 테스트 파일 목록을 비교하여 누락된 것을 식별한다.
+
+4-2. 누락된 각 팩토리의 소스를 읽고 로직을 파악한다.
+
+4-3. 각 팩토리별 테스트 파일 생성
+     테스트 케이스:
+       - 정상 입력으로 엔티티가 올바르게 생성되는지 확인
+       - 필수 필드 누락 시 에러 발생 확인
+       - 생성된 엔티티의 초기 상태가 올바른지 확인
+       - 도메인 이벤트가 발행되는지 확인
+
+4-4. 검증 실행: cd flow-backend && npm run typecheck && npm run test && npm run lint
+
+
+----- Phase 5 이벤트 핸들러 사일런트 에러 캐치 개선 -----
+
+핵심 파일:
+  - flow-backend/src/workflow/application/event-handlers/git-deleted-handler.ts
+  - flow-backend/src/workflow/application/event-handlers/mcp-server-unregistered-handler.ts
+  - flow-backend/src/workflow-runtime/application/event-handlers/ 하위 모든 핸들러
+참조:
+  - flow-backend/src/common/infra/persistent-event-publisher.ts — 이벤트 발행 에러 처리 패턴
+
+5-1. 모든 이벤트 핸들러에서 catch 블록을 검색한다.
+     빈 catch 블록이나 에러를 무시하는 패턴을 식별한다.
+
+5-2. 사일런트 캐치를 NestJS Logger로 교체한다.
+     각 핸들러 클래스에 Logger 인스턴스가 없으면 추가한다:
+       import { Logger } from '@nestjs/common';
+       private readonly logger = new Logger(HandlerName.name);
+
+     빈 catch 블록 또는 console.error 사용 부분을 교체:
+       catch (error: unknown) {
+         this.logger.error(
+           `Failed to handle ${EventType.EVENT_TYPE} for ${entityId}`,
+           error instanceof Error ? error.stack : String(error),
+         );
+       }
+
+     이벤트 핸들러는 예외를 삼키는 것이 맞다 — 이벤트 처리 실패가 발행자를 중단시키면 안 된다.
+     하지만 반드시 로깅하여 디버깅이 가능해야 한다.
+
+5-3. 검증 실행: cd flow-backend && npm run typecheck && npm run test && npm run lint
+
+
+----- Phase 6 Swagger/OpenAPI 문서 자동 생성 -----
+
+핵심 파일:
+  - flow-backend/src/main.ts — 수정
+  - flow-backend/src/workflow/presentation/workflow.controller.ts — 데코레이터 추가
+  - flow-backend/src/workflow-runtime/presentation/workflow-runtime.controller.ts — 데코레이터 추가
+  - flow-backend/src/git/presentation/git.controller.ts — 데코레이터 추가
+  - flow-backend/src/mcp/presentation/mcp.controller.ts — 데코레이터 추가
+  - flow-backend/src/agent/presentation/agent.controller.ts — 데코레이터 추가
+  - flow-backend/src/workflow-runtime/presentation/report.controller.ts — 데코레이터 추가
+참조:
+  - NestJS Swagger 공식 문서 패턴
+
+6-1. @nestjs/swagger 패키지 설치
+     cd flow-backend && npm install @nestjs/swagger
+
+6-2. main.ts에 Swagger 설정 추가
+     import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
+
+     bootstrap 함수 내, app.listen 전에:
+       const config = new DocumentBuilder()
+         .setTitle('FlowFlow API')
+         .setDescription('워크플로우 기반 AI 에이전트 실행 관리 플랫폼 API')
+         .setVersion('1.0')
+         .build();
+       const document = SwaggerModule.createDocument(app, config);
+       SwaggerModule.setup('api-docs', app, document);
+
+6-3. 각 컨트롤러에 @ApiTags 데코레이터 추가
+     workflow.controller.ts: @ApiTags('Workflows')
+     workflow-runtime.controller.ts: @ApiTags('Workflow Runs')
+     git.controller.ts: @ApiTags('Git Repositories')
+     mcp.controller.ts: @ApiTags('MCP Servers')
+     agent.controller.ts: @ApiTags('Agent Sessions')
+     report.controller.ts: @ApiTags('Reports')
+
+6-4. 주요 엔드포인트에 @ApiOperation 데코레이터 추가
+     각 컨트롤러의 각 메서드에 @ApiOperation({ summary: '...' }) 추가.
+     한국어 또는 영어로 간결하게 작성한다.
+     예시:
+       @ApiOperation({ summary: 'Create a new workflow' })
+       @Post()
+       async create(@Body() dto: CreateWorkflowDto) { ... }
+
+6-5. DTO에 @ApiProperty 데코레이터 추가
+     모든 DTO 클래스의 각 필드에 @ApiProperty 또는 @ApiPropertyOptional 추가.
+     기존 class-validator 데코레이터와 함께 사용한다.
+     예시:
+       @ApiProperty({ description: 'Workflow name', example: 'My Workflow' })
+       @IsString()
+       @IsNotEmpty()
+       name!: string;
+
+     선택적 필드에는 @ApiPropertyOptional 사용:
+       @ApiPropertyOptional({ description: 'Seed variable keys', type: [String] })
+       @IsOptional()
+       @IsArray()
+       seedKeys?: string[];
+
+6-6. 응답 타입에 @ApiResponse 데코레이터 추가
+     주요 엔드포인트에 성공/에러 응답 타입을 명시한다:
+       @ApiResponse({ status: 201, description: 'Workflow created successfully' })
+       @ApiResponse({ status: 400, description: 'Invalid input' })
+       @ApiResponse({ status: 404, description: 'Workflow not found' })
+       @ApiResponse({ status: 422, description: 'Domain rule violation' })
+
+6-7. Swagger UI 동작 확인
+     cd flow-backend && npm run build && npm run start
+     http://localhost:3000/api-docs 접속하여 Swagger UI가 표시되는지 확인
+     모든 엔드포인트가 태그별로 그룹핑되어 있는지 확인
+     DTO 스키마가 올바르게 표시되는지 확인
+
+6-8. 검증 실행: cd flow-backend && npm run typecheck && npm run test && npm run lint
+
+
+모든 Phase가 완료되고 전체 검증이 통과하면 BACKEND EVALUATION IMPROVEMENTS COMPLETE 를 출력한다.

@@ -1,0 +1,317 @@
+완료된 태스크의 리포트/에이전트 로그 미표시 버그 2건과 워크플로우 편집기의 Pause 토글 미동작 1건을 수정한다.
+백엔드와 프론트엔드 모두 수정이 필요하다.
+flow-backend/CLAUDE.md, flow-front/CLAUDE.md의 모든 규칙을 준수한다.
+
+버그 목록:
+  버그1. 리포트 파일을 읽을 수 없음 -- 리포트를 파일로 저장하지만 런 종료 시 WorkflowRunTerminatedHandler가
+        workflowSpace 디렉토리를 통째로 삭제하여 reports 서브디렉토리도 함께 삭제됨.
+        리포트 조회 시 "리포트 파일을 읽을 수 없습니다" 에러 발생.
+  버그2. 에이전트 세션 로그가 비어있음 -- 완료된 태스크의 에이전트 로그가 "로그가 없습니다"로 표시됨.
+        start()에서 tempSessionId와 실제 sessionId 간 버퍼 불일치, sendQuery() 로그 누락 가능성.
+  버그3. 워크플로우 편집기에서 Pause 토글 미동작 -- WorkNode의 Pause 아이콘 클릭과
+        PauseIndicatorNode 클릭이 아무 반응 없음.
+        useWorkflowToFlow 훅에서 isEditable, onTogglePauseAfter, onRemovePause 콜백을 전달하지 않기 때문.
+
+아래 4개 Phase를 순서대로 진행한다.
+각 Phase 완료 후 반드시 아래 검증을 실행한다. 검증 실패 시 수정 후 다시 검증한다. 검증 통과 후 다음 Phase로 진행한다.
+  백엔드 검증: cd flow-backend && npm run typecheck && npm run test && npm run lint
+  프론트엔드 검증: cd flow-front && npx tsc -b && npm run lint && npm run build
+각 Phase 완료 후 Playwright MCP를 통해 localhost:5173에 접속하여 실제 화면을 확인하고 문제가 있으면 즉시 수정한다.
+
+----- Phase 1 리포트 콘텐츠 인메모리 저장 (버그1 해결) -----
+
+핵심 원인: SendQueryUseCase가 리포트를 /tmp/workflow-spaces/RUN_ID/reports/REPORT_ID.md 파일로 저장하고,
+Report 엔티티에는 filePath만 기록한다. 이후 WorkflowRunTerminatedHandler가 workflowSpace 디렉토리를
+통째로 deleteDirectory()하면서 리포트 파일도 삭제된다. ReportController가 filePath로 파일을 읽으려 하면 실패한다.
+
+해결 전략: Report 엔티티에 content 필드를 추가하여 리포트 내용을 엔티티 자체에 저장한다.
+파일 기반 저장은 유지하되(향후 확장용), ReportController는 엔티티의 content를 우선 사용하고
+content가 없을 때만 filePath 폴백으로 파일을 읽는다.
+
+핵심 파일:
+  - flow-backend/src/workflow-runtime/domain/entities/report.ts
+  - flow-backend/src/workflow-runtime/application/use-cases/send-query-use-case.ts
+  - flow-backend/src/workflow-runtime/presentation/report.controller.ts
+  - flow-backend/src/workflow-runtime/infra/typeorm/report.schema.ts
+  - flow-backend/src/workflow-runtime/infra/typeorm/report-typeorm-repository.ts
+참조할 코드 (읽기만, 수정하지 않음):
+  - flow-backend/src/workflow-runtime/infra/in-memory-report-repository.ts (InMemoryReportRepository 구현)
+  - flow-backend/src/workflow-runtime/application/event-handlers/workflow-run-terminated-handler.ts (삭제 원인 확인)
+
+1-1. Report 엔티티에 content 필드 추가
+     flow-backend/src/workflow-runtime/domain/entities/report.ts 수정:
+
+     a) ReportProps 인터페이스에 content 추가:
+          content: string | null
+
+     b) Report 클래스에 private 필드 및 getter 추가:
+          private _content: string | null
+          get content(): string | null -- _content 반환
+
+     c) constructor에서 _content 초기화:
+          props.content가 있으면 대입, 없으면 null
+
+     d) create() 및 createWithId()에서 content: null 추가
+
+     e) complete() 메서드 시그니처를 변경하여 content도 수신:
+          complete(filePath: string, content: string): void
+          기존 validation 유지하면서 _content에도 content를 대입
+
+     f) reset()에서 _content도 null로 초기화
+
+1-2. SendQueryUseCase에서 complete() 호출 시 content 전달
+     flow-backend/src/workflow-runtime/application/use-cases/send-query-use-case.ts 수정:
+
+     현재 (line 104):
+       report.complete(reportPath)
+     변경:
+       report.complete(reportPath, queryResult.response)
+     queryResult.response가 에이전트의 응답 텍스트이므로 그대로 리포트 content로 저장한다.
+
+1-3. ReportController에서 content 우선 사용
+     flow-backend/src/workflow-runtime/presentation/report.controller.ts 수정:
+
+     현재 로직 (line 27~37): completedReports를 순회하며 report.filePath로 파일을 읽어 contents 배열에 push.
+     파일 읽기 실패 시 에러 메시지를 push.
+
+     변경: completedReports 순회 시 먼저 report.content를 확인.
+     report.content가 존재하면 바로 contents에 push.
+     report.content가 없고 report.filePath가 있으면 기존처럼 파일 읽기 시도.
+     파일 읽기 실패 시 기존 에러 메시지 push.
+
+1-4. TypeORM 스키마에 content 컬럼 추가
+     flow-backend/src/workflow-runtime/infra/typeorm/report.schema.ts 수정:
+
+     a) ReportRow 인터페이스에 추가:
+          content: string | null
+
+     b) ReportSchema columns에 추가:
+          content 컬럼, type text, nullable true
+
+1-5. TypeORM Repository 매핑 수정
+     flow-backend/src/workflow-runtime/infra/typeorm/report-typeorm-repository.ts 수정:
+
+     a) toDomain()에서 content 매핑 추가:
+          Report.fromProps 호출 시 content: row.content 포함
+
+     b) toRow()에서 content 매핑 추가:
+          content: entity.content
+
+1-6. 기존 테스트 확인 및 수정
+     Report.complete() 시그니처가 변경되었으므로 기존 테스트에서 complete() 호출하는 부분을
+     complete(filePath, content) 형태로 수정한다. grep으로 report.complete 패턴을 검색하여 모두 수정.
+
+1-7. 백엔드 검증 실행
+
+----- Phase 2 에이전트 로그 버퍼 수정 (버그2 해결) -----
+
+핵심 원인 분석:
+  ClaudeAgentClient.start()에서 SDK 메시지를 소비하며 로그를 버퍼링한다.
+  init 메시지 수신 전 로그는 tempSessionId 키로, init 후 로그는 실제 sessionId 키로 버퍼링된다.
+  AgentServiceImpl.startSession()이 tagAndFlush(handle.sessionId, weId)를 호출하면
+  실제 sessionId 키의 버퍼만 플러시되고 tempSessionId 키의 로그는 영구 유실된다.
+  또한 sendQuery()에서 emitLogDirect가 assistant/result 타입만 처리하여 system 메시지가 누락된다.
+
+해결 전략:
+  a) start()에서 모든 메시지를 tempSessionId로 일관되게 버퍼링
+  b) start() 완료 후 tempSessionId 버퍼를 실제 sessionId 키로 이전
+  c) AgentLogEmitter에 transferBuffer 메서드 추가
+  d) sendQuery()의 emitLogDirect에 system 메시지 처리 추가
+  e) 디버그 로깅 추가로 문제 추적 지원
+
+핵심 파일:
+  - flow-backend/src/agent/infra/claude-agent-client.ts
+  - flow-backend/src/agent/application/agent-log-emitter.ts
+참조할 코드 (읽기만, 수정하지 않음):
+  - flow-backend/src/agent/infra/agent-service-impl.ts (tagAndFlush 호출부)
+  - flow-backend/src/agent/application/agent-log-entry.ts (엔트리 타입 정의)
+  - flow-backend/src/agent/infra/in-memory-agent-log-repository.ts (저장소 구현)
+
+2-1. AgentLogEmitter에 transferBuffer 메서드 추가
+     flow-backend/src/agent/application/agent-log-emitter.ts 수정:
+
+     tagAndFlush 메서드 아래에 추가:
+       transferBuffer(fromKey, toKey) 메서드:
+         fromKey 버퍼를 가져오고, 비어있으면 리턴.
+         fromKey 버퍼를 삭제.
+         toKey 버퍼가 있으면 가져오고 없으면 빈 배열.
+         fromBuf와 toBuf를 합쳐서(fromBuf 먼저, 시간순 유지) toKey로 저장.
+
+2-2. AgentLogEmitter.tagAndFlush에 디버그 로깅 추가
+     flow-backend/src/agent/application/agent-log-emitter.ts 수정:
+
+     tagAndFlush 메서드 시작 부분에 console.log 추가:
+       "tagAndFlush: sessionId=해당값, weId=해당값, bufferSize=해당버퍼크기" 형식으로 출력.
+
+     tagged 배열이 비어있지 않아서 saveAll 호출하는 블록 내에 console.log 추가:
+       "Flushed N entries for weId=해당값" 형식으로 출력.
+
+2-3. ClaudeAgentClient.start()의 버퍼링을 tempSessionId로 통일
+     flow-backend/src/agent/infra/claude-agent-client.ts 수정:
+
+     현재 (line 83~93): for-await 루프에서 init 메시지인 경우 sessionId를 추출한 뒤
+     sessionId ?? tempSessionId 로 emitLogFromMessage를 호출한다.
+     이로 인해 init 전 메시지는 tempSessionId로, init 후 메시지는 sessionId로 분산 버퍼링된다.
+
+     변경: for-await 루프에서 init 메시지인 경우 sessionId만 추출한다.
+     emitLogFromMessage는 항상 tempSessionId를 키로 호출한다.
+     즉, 모든 메시지를 tempSessionId 하나로 일관되게 버퍼링한다.
+
+2-4. start() 완료 후 tempSessionId 버퍼를 sessionId로 이전
+     flow-backend/src/agent/infra/claude-agent-client.ts 수정:
+
+     현재 (line 95~100 부근): sessionId가 없으면 tempSessionId를 대입하고 sessions에 저장 후 리턴.
+
+     변경: sessionId 폴백 로직 후, sessions.set 호출 전에 다음을 추가:
+       sessionId와 tempSessionId가 다르고 agentLogEmitter가 존재하면,
+       agentLogEmitter.transferBuffer(tempSessionId, sessionId)를 호출한다.
+     그리고 console.log로 sessionId, tempSessionId, msgCount를 출력한다.
+
+2-5. sendQuery()의 emitLogDirect에 system 메시지 처리 추가
+     flow-backend/src/agent/infra/claude-agent-client.ts 수정:
+
+     emitLogDirect 메서드 (line 209~229):
+     현재: message.type이 assistant이거나 result인 경우만 처리.
+
+     변경: 맨 앞에 message.type이 system이고 subtype이 있는 경우를 추가.
+     이 경우 agentLogEmitter.emitDirect로 system_init 타입 엔트리를 저장.
+     text에는 "System: " + subtype 값을 넣는다.
+     기존 assistant, result 분기는 else if로 유지.
+
+2-6. sendQuery()에 로그 카운트 디버깅 추가
+     flow-backend/src/agent/infra/claude-agent-client.ts 수정:
+
+     sendQuery() 메서드의 for-await 루프 전에 let loggedCount = 0 선언.
+     루프 내 emitLogDirect 또는 emitLogFromMessage 호출 후 loggedCount 증가.
+     루프 완료 후 console.log로 messages, logged, responseLen, weId를 출력.
+
+2-7. 백엔드 검증 실행
+
+----- Phase 3 워크플로우 편집기 Pause 토글 연결 (버그3 해결) -----
+
+핵심 원인: useWorkflowToFlow 훅이 WorkNodeData와 PauseIndicatorNodeData를 생성할 때
+isEditable, onTogglePauseAfter, onRemovePause 콜백을 전달하지 않는다.
+WorkNode 컴포넌트는 data.isEditable && data.onTogglePauseAfter 조건이 false이므로
+Pause 아이콘이 항상 읽기 전용으로 렌더링된다.
+PauseIndicatorNode도 data.isEditable && data.onRemovePause가 없어 클릭해도 반응 없다.
+
+해결 전략: useWorkflowToFlow에 콜백 옵션을 추가하거나, WorkflowFlowEditorPage에서
+노드 생성 후 콜백을 주입한다. useWorkflowToFlow에 콜백 파라미터를 추가하는 방식이 깔끔하다.
+
+핵심 파일:
+  - flow-front/src/components/flow/hooks/useWorkflowToFlow.ts
+  - flow-front/src/pages/WorkflowFlowEditorPage.tsx
+참조할 코드 (읽기만, 수정하지 않음):
+  - flow-front/src/components/flow/types.ts (WorkNodeData, PauseIndicatorNodeData 인터페이스)
+  - flow-front/src/components/flow/nodes/WorkNode.tsx (line 46~65: isEditable && onTogglePauseAfter 조건)
+  - flow-front/src/components/flow/nodes/PauseIndicatorNode.tsx (line 8: isEditable && onRemovePause 조건)
+
+3-1. useWorkflowToFlow에 콜백 옵션 파라미터 추가
+     flow-front/src/components/flow/hooks/useWorkflowToFlow.ts 수정:
+
+     현재 시그니처:
+       useWorkflowToFlow(values, mode)
+     변경 -- 세 번째 옵션 파라미터 추가:
+       useWorkflowToFlow(values, mode, options?)
+       options 타입:
+         onTogglePauseAfter?: (workIndex: number) => void
+         onRemovePause?: (afterWorkIndex: number) => void
+
+3-2. WorkNode 데이터 생성 시 콜백 전달
+     useWorkflowToFlow.ts의 Work 노드 생성 부분 (현재 line 86~96):
+
+     현재 data에 workIndex, model, taskCount, pauseAfter만 전달.
+     변경: mode가 edit이고 options가 존재할 때 다음을 추가:
+       isEditable: mode === 'edit'
+       onTogglePauseAfter: options?.onTogglePauseAfter
+     주의: useMemo의 deps 배열에 options를 추가하면 매 렌더마다 재계산되므로,
+     개별 콜백 레퍼런스(options?.onTogglePauseAfter, options?.onRemovePause)를 deps에 추가한다.
+
+3-3. PauseIndicatorNode 데이터 생성 시 콜백 전달
+     useWorkflowToFlow.ts의 PauseIndicator 노드 생성 부분 (현재 line 136~151):
+
+     현재 data에 afterWorkIndex만 전달.
+     변경: mode가 edit이고 options가 존재할 때 다음을 추가:
+       isEditable: mode === 'edit'
+       onRemovePause: options?.onRemovePause
+
+3-4. WorkflowFlowEditorPage에서 콜백 정의 및 전달
+     flow-front/src/pages/WorkflowFlowEditorPage.tsx 수정:
+
+     a) useCallback으로 togglePauseAfter 콜백 정의:
+        workIndex를 받아서 form.setValue로 해당 workDefinition의 pauseAfter를 현재값의 반대로 토글.
+        즉 현재 form.getValues로 해당 workIndex의 pauseAfter를 읽고, !값으로 setValue.
+
+     b) useCallback으로 removePause 콜백 정의:
+        afterWorkIndex를 받아서 form.setValue로 해당 workDefinition의 pauseAfter를 false로 설정.
+
+     c) useWorkflowToFlow 호출에 options 전달:
+        현재: useWorkflowToFlow(watchedValues, flowMode)
+        변경: useWorkflowToFlow(watchedValues, flowMode, 편집모드일때 콜백 전달)
+        view 모드에서는 콜백 불필요 (undefined 전달).
+
+3-5. useMemo deps 안정성 확인
+     useWorkflowToFlow 내부의 useMemo deps에 콜백 레퍼런스가 포함되므로,
+     WorkflowFlowEditorPage의 콜백이 useCallback으로 안정화되어 있는지 확인.
+     form 인스턴스는 useForm의 리턴값으로 안정적이므로 deps에 form만 포함하면 된다.
+
+3-6. 프론트엔드 검증 실행:
+     cd flow-front && npx tsc -b && npm run lint && npm run build
+
+----- Phase 4 통합 검증 -----
+
+4-1. 백엔드 서버 실행 상태 확인
+     localhost:3000 으로 접근하여 서버가 실행 중인지 확인한다.
+     실행 중이지 않으면: cd flow-backend && npm run build && npm run start 를 백그라운드로 실행한다.
+
+4-2. 프론트엔드 dev 서버 실행 상태 확인
+     localhost:5173 으로 접근하여 서버가 실행 중인지 확인한다.
+     실행 중이지 않으면: cd flow-front && npm run dev 를 백그라운드로 실행한다.
+
+4-3. Playwright MCP로 다음 시나리오를 검증:
+
+     시나리오 A -- 워크플로우 편집기 Pause 토글:
+       localhost:5173/workflows/new 로 이동하여 새 워크플로우 생성 화면 진입
+       Work 노드 2개 이상 추가
+       Work 노드의 Pause 아이콘 클릭 -> pauseAfter가 토글되는지 확인
+       토글 시 노드 사이에 노란 점선 Pause 인디케이터가 나타나거나 사라지는지 확인
+       Pause 인디케이터 클릭 -> pauseAfter가 해제되고 인디케이터가 사라지는지 확인
+       사이드 패널의 "완료 후 일시정지" 체크박스와 동기화되는지 확인
+
+     시나리오 B -- 워크플로우 실행 시작:
+       ACTIVE 워크플로우의 드롭다운에서 "실행" 클릭
+       런타임 상세 페이지로 자동 이동 확인
+       RUNNING 상태가 표시되는지 확인
+
+     시나리오 C -- 실행 중 에이전트 로그 확인:
+       RUNNING 상태에서 현재 실행중인 Work 노드 클릭
+       사이드 패널에서 "에이전트 로그" 탭 선택
+       로그 엔트리가 실시간으로 표시되는지 확인 (tool_use, assistant_text 등)
+       "로그가 없습니다" 대신 실제 로그가 나오는지 확인
+
+     시나리오 D -- 완료 후 리포트 확인:
+       워크플로우가 COMPLETED 상태가 될 때까지 대기 (또는 이미 완료된 런 사용)
+       완료된 Work 노드 클릭
+       "리포트" 탭에서 마크다운 리포트가 정상 렌더링되는지 확인
+       "리포트 파일을 읽을 수 없습니다" 에러가 더 이상 나타나지 않는지 확인
+
+     시나리오 E -- 완료 후 에이전트 로그 확인:
+       완료된 Work 노드 클릭 -> "에이전트 로그" 탭
+       로그 엔트리가 표시되는지 확인
+       "로그가 없습니다" 대신 실제 로그가 나오는지 확인
+       result_summary 엔트리(비용, 토큰 수, 소요시간)가 표시되는지 확인
+
+4-4. 서버 콘솔에서 디버그 로그 확인
+     서버 콘솔 출력에서 다음 로그가 정상 출력되는지 확인:
+       tagAndFlush 로그에 bufferSize가 0이 아닌 값
+       Flushed N entries 로그에 N이 0이 아닌 값
+       sendQuery completed 로그에 logged가 0이 아닌 값
+     logged 카운트가 0이면 SDK 메시지 문제를 추가 조사.
+
+4-5. 문제 발견 시 즉시 수정하고 재검증
+
+4-6. 최종 검증 실행:
+     cd flow-backend && npm run typecheck && npm run test && npm run lint
+     cd flow-front && npx tsc -b && npm run lint && npm run build
+
+모든 Phase가 완료되고 전체 시나리오 검증이 통과하면 REPORT LOGS AND PAUSE TOGGLE FIX COMPLETE 를 출력한다.

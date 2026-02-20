@@ -1,0 +1,12 @@
+Ralph Loop 실행 방법
+====================
+
+1. flowflow/ 루트 디렉토리에서 Claude Code 실행
+2. 아래 커맨드 입력:
+
+/ralph-loop:ralph-loop
+
+3. 프롬프트 입력 시 flowchart-ui-prompt.txt 내용을 붙여넣기
+4. 옵션:
+   --completion-promise FLOWCHART UI OVERHAUL COMPLETE
+   --max-iterations 50

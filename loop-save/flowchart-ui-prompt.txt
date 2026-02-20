@@ -1,0 +1,138 @@
+FlowFlow 워크플로우 상세 UI를 LangFlow 스타일 플로우 차트로 전면 개편한다.
+현재 폼 기반 편집 페이지와 리스트 기반 실행 상태 페이지를 ReactFlow 기반의 통합 플로우 차트 UI로 교체한다.
+편집 화면과 실행 화면이 동일한 플로우 차트 레이아웃을 공유하되, 편집 모드에서는 노드 추가/삭제/수정이 가능하고 실행 모드에서는 상태 오버레이와 리포트 뷰어가 표시된다.
+
+백엔드 아키텍처는 절대로 훼손하지 않는다. 백엔드 API 변경은 없다. 프론트엔드만 수정한다.
+flow-front/CLAUDE.md와 flow-backend/CLAUDE.md의 모든 규칙을 준수한다.
+
+아래 5개 Phase를 순서대로 진행한다. 각 Phase 완료 후 반드시 cd flow-front && npx tsc -b && npm run lint && npm run build 로 검증한다. 검증 실패 시 수정 후 다시 검증한다. 검증 통과 후 다음 Phase로 진행한다. 각 Phase 완료 후 Playwright MCP를 통해 localhost:5173에 접속하여 실제 화면을 확인하고 문제가 있으면 즉시 수정한다.
+
+----- Phase 1 Foundation -----
+
+1-1. flow-front 디렉토리에서 npm install @xyflow/react @dagrejs/dagre 실행
+1-2. @types/dagre가 필요하면 npm install -D @types/dagre 실행
+1-3. src/components/flow/ 디렉토리 구조 생성
+     - flow/types.ts -- FlowNodeType, FlowEdgeType, FlowMode 등 타입 정의
+     - flow/constants.ts -- 노드 크기, 상태별 Tailwind 색상
+     - flow/FlowCanvas.tsx -- ReactFlow 래퍼 컴포넌트. MiniMap, Background, Controls 포함. mode prop으로 edit/view 전환
+     - flow/nodes/StartNode.tsx -- 원형 시작 노드
+     - flow/nodes/EndNode.tsx -- 원형 종료 노드
+     - flow/nodes/WorkNode.tsx -- Work 노드. model 뱃지, task 수, pauseAfter 표시기, 상태별 색상. Handle 상하
+     - flow/nodes/TaskNode.tsx -- Task 노드. query 텍스트 미리보기(40자), report outline 아이콘. Handle 상하
+     - flow/nodes/PauseIndicatorNode.tsx -- pauseAfter 시각 표시 (점선 구분자)
+     - flow/edges/SequenceEdge.tsx -- 커스텀 엣지. running 상태에서 애니메이션 점선
+     - flow/hooks/useFlowLayout.ts -- dagre로 노드 위치 자동 계산. TB 방향. 노드 크기에 따른 간격
+1-4. 검증 실행
+
+----- Phase 2 Workflow Editor Flow Chart -----
+
+2-1. flow/hooks/useWorkflowToFlow.ts 생성
+     - WorkflowResponse 또는 React Hook Form values를 받아 ReactFlow 노드와 엣지 배열로 변환
+     - StartNode -> WorkNode들 (순서대로) -> EndNode 연결
+     - 각 WorkNode 하위에 TaskNode들 배치
+     - pauseAfter가 true인 WorkNode 다음에 PauseIndicatorNode 삽입
+2-2. src/pages/WorkflowFlowEditorPage.tsx 생성
+     - 기존 WorkflowFormPage.tsx의 useForm, Zod 스키마, API 호출 로직을 이 페이지에 재구현
+     - 왼쪽 영역: FlowCanvas mode edit
+     - 오른쪽 영역: 사이드 패널 (선택된 노드에 따라 다른 패널 표시)
+     - 선택 없음: WorkflowInfoPanel (이름, 설명, issueKey, branchStrategy, 워크플로우 레벨 gitRefs, mcpServerRefs)
+     - Work 노드 선택: WorkNodePanel (model 선택, pauseAfter 토글, work 레벨 git/MCP 오버라이드, task 추가 버튼)
+     - Task 노드 선택: TaskNodePanel (query textarea, reportOutline sections 편집)
+     - 상단에 저장/취소 버튼
+     - 기존 WorkflowFormPage.tsx의 모든 기능을 빠짐없이 포함
+2-3. 사이드 패널 컴포넌트들 생성
+     - flow/panels/WorkflowInfoPanel.tsx
+     - flow/panels/WorkNodePanel.tsx
+     - flow/panels/TaskNodePanel.tsx
+     - flow/panels/GitRefPanel.tsx
+     - flow/panels/McpRefPanel.tsx
+2-4. FlowCanvas에 편집 인터랙션 추가
+     - Work 노드 사이에 + 버튼으로 새 Work 추가
+     - Work 노드 우클릭 컨텍스트 메뉴: 삭제, 위로/아래로 이동
+     - Task 추가/삭제는 사이드 패널에서 처리
+2-5. src/App.tsx에 새 라우트 추가 (기존 라우트는 유지)
+     - /workflows/new/flow -> WorkflowFlowEditorPage
+     - /workflows/:id/edit/flow -> WorkflowFlowEditorPage
+2-6. Playwright MCP로 /workflows/new/flow 접속하여 동작 확인
+     - 새 워크플로우 생성 가능한지
+     - Work 노드 추가/삭제/편집 가능한지
+     - Task 추가/삭제/편집 가능한지
+     - Git/MCP ref 설정 가능한지
+     - 저장 시 API 호출이 정상적인지
+2-7. 검증 실행
+
+----- Phase 3 Workflow Run Flow Chart -----
+
+3-1. flow/hooks/useWorkflowRunToFlow.ts 생성
+     - WorkflowRunDetailResponse와 CheckpointResponse 배열을 받아 상태 오버레이가 적용된 노드/엣지 반환
+     - 상태 매핑:
+       sequence < currentWorkIndex -> completed 파란색
+       sequence == currentWorkIndex이고 RUNNING -> running 초록색 애니메이션
+       sequence == currentWorkIndex이고 PAUSED -> paused 노란색
+       sequence == currentWorkIndex이고 AWAITING -> awaiting 주황색
+       sequence > currentWorkIndex -> pending 회색
+       cancelled -> cancelled 빨간색
+     - 체크포인트가 있는 work 노드에 체크포인트 표시기 추가
+3-2. src/pages/WorkflowRunFlowPage.tsx 생성
+     - 기존 WorkflowRunDetailPage.tsx의 모든 기능을 포함
+     - 왼쪽: FlowCanvas mode view (상태 오버레이, 애니메이션 엣지)
+     - 오른쪽: 사이드 패널
+     - 기본: RunOverviewPanel (상태 뱃지, 진행률, pause/resume/cancel 버튼, agent session 링크)
+     - 완료된 Task 선택: ReportViewerPanel (react-markdown으로 리포트 마크다운 렌더링)
+     - PAUSED 상태에서 미래 Work 선택: RuntimeWorkNodePanel (model, tasks, pauseAfter 편집)
+     - 체크포인트 클릭: CheckpointPanel (복원 확인)
+3-3. 실행 전용 패널 컴포넌트들 생성
+     - flow/panels/RunOverviewPanel.tsx
+     - flow/panels/ReportViewerPanel.tsx
+     - flow/panels/RuntimeWorkNodePanel.tsx
+     - flow/panels/CheckpointPanel.tsx
+3-4. 실시간 갱신 구현
+     - 기존 useWorkflowRunDetail의 refetchInterval 3초 활용
+     - 데이터 변경 시 useWorkflowRunToFlow가 새 노드 재생성
+     - 상태 전환 시 CSS transition으로 부드러운 색상 변경
+3-5. src/App.tsx에 새 라우트 추가
+     - /workflow-runs/:id/flow -> WorkflowRunFlowPage
+3-6. Playwright MCP로 실행 중인 workflow run 페이지 확인
+     - 상태 오버레이가 정상 표시되는지
+     - pause/resume/cancel 동작하는지
+     - 리포트 뷰어가 작동하는지
+     - work 노드 편집(paused 상태)이 가능한지
+3-7. 검증 실행
+
+----- Phase 4 Integration -----
+
+4-1. src/App.tsx 라우트 교체
+     - /workflows/new -> WorkflowFlowEditorPage
+     - /workflows/:id/edit -> WorkflowFlowEditorPage
+     - /workflow-runs/:id -> WorkflowRunFlowPage
+     - /flow 접미사 붙은 임시 라우트 제거
+     - /workflow-runs/:id/agent -> AgentSessionPage (변경 없음)
+4-2. WorkflowListPage.tsx의 네비게이션 링크가 새 페이지로 정상 이동하는지 확인
+4-3. DashboardPage.tsx의 run 클릭이 새 실행 페이지로 이동하는지 확인
+4-4. 기존 페이지 삭제
+     - src/pages/WorkflowFormPage.tsx 삭제
+     - src/pages/WorkflowRunDetailPage.tsx 삭제
+     - App.tsx에서 import 정리
+4-5. 전체 유스케이스 Playwright MCP 검증
+     - 워크플로우 생성 (플로우 차트로)
+     - 워크플로우 편집
+     - 워크플로우 활성화/비활성화 (리스트에서)
+     - 실행 시작 -> 실행 상태 페이지 확인
+     - 일시정지/재개/취소
+     - Work 노드 편집/추가/삭제 (paused 상태)
+     - 리포트 확인
+     - 에이전트 세션 진입
+4-6. 검증 실행
+
+----- Phase 5 Polish -----
+
+5-1. 엣지 애니메이션: running 상태의 엣지에 SVG 대시 애니메이션 CSS 적용
+5-2. 노드 상태 전환 효과: Tailwind transition 클래스로 색상/테두리 전환
+5-3. Work 노드 접기/펼치기: 클릭으로 하위 Task 노드 표시/숨기기 토글
+5-4. 자동 정렬 버튼: fitView, 노드 재배치 기능
+5-5. 키보드 단축키: Ctrl+S 저장(편집 모드), Delete 삭제, Escape 선택 해제
+5-6. 반응형: 작은 화면에서 사이드 패널을 하단 시트로 전환
+5-7. 최종 Playwright MCP 전수 검증
+5-8. 최종 검증 실행
+
+모든 Phase가 완료되고 전체 유스케이스 검증이 통과하면 FLOWCHART UI OVERHAUL COMPLETE 를 출력한다.

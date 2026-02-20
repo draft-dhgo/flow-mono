@@ -1,0 +1,437 @@
+백엔드 전체 CQRS 분리 리팩터링: use-cases/ → commands/ + queries/ 재구조화.
+컨트롤러에서 리포지토리 직접 호출을 제거하고 Query Use Case를 통해 데이터를 조회한다.
+도메인 엔티티/밸류오브젝트의 비즈니스 로직은 수정하지 않는다.
+flow-backend/CLAUDE.md의 모든 규칙(특히 규칙 5-1, 5-2, 5-3)을 준수한다.
+
+수정할 항목 목록:
+  [디렉토리 구조 변경]
+  1. 5개 도메인(workflow, git, mcp, agent, workflow-runtime)의 use-cases/ → commands/ 이동
+  2. 5개 도메인에 queries/ 디렉토리 생성 및 13개 Query Use Case 작성
+  [컨트롤러 변경]
+  3. 12개 GET 엔드포인트에서 리포지토리 직접 호출 → Query Use Case 사용
+  [Import 경로 변경]
+  4. 소스 파일 25개 + 테스트 파일 22개 + mcp-gateway 4개의 import 경로 업데이트
+  [모듈 등록]
+  5. 5개 NestJS Module에 Query Use Case 등록
+
+아래 7개 Phase를 순서대로 진행한다.
+각 Phase 완료 후 반드시 아래 검증을 실행한다. 검증 실패 시 수정 후 다시 검증한다. 검증 통과 후 다음 Phase로 진행한다.
+  백엔드 검증: cd flow-backend && npm run typecheck && npm run test && npm run lint
+
+===================================================================
+===== Phase 1: workflow 도메인 CQRS 분리 =========================
+===================================================================
+
+----- Phase 1 workflow 도메인 -----
+
+핵심 파일 (수정 대상):
+  - flow-backend/src/workflow/application/use-cases/ (디렉토리 전체 → commands/로 이동)
+  - flow-backend/src/workflow/application/use-cases/index.ts → commands/index.ts
+  - flow-backend/src/workflow/application/index.ts
+  - flow-backend/src/workflow/presentation/workflow.controller.ts
+  - flow-backend/src/workflow/presentation/workflow.module.ts
+참조할 코드 (읽기만, 수정하지 않음):
+  - flow-backend/src/workflow/domain/ports/workflow-repository.ts (WorkflowRepository 인터페이스)
+  - flow-backend/src/workflow/domain/entities/workflow.ts (Workflow 엔티티)
+
+1-1. use-cases/ → commands/ 디렉토리 이동
+     셸 명령으로 디렉토리를 이동한다:
+       mv flow-backend/src/workflow/application/use-cases flow-backend/src/workflow/application/commands
+
+1-2. queries/ 디렉토리 생성 및 Query Use Case 작성
+     flow-backend/src/workflow/application/queries/ 디렉토리를 생성한다.
+
+     (a) ListWorkflowsQuery 작성: flow-backend/src/workflow/application/queries/list-workflows-query.ts
+         - @Injectable() 데코레이터 사용
+         - WorkflowRepository를 주입받는다 (EventPublisher 없음)
+         - execute(): Promise<WorkflowReadModel[]> 반환
+         - WorkflowReadModel은 컨트롤러의 serializeWorkflow()와 동일한 구조의 인터페이스
+         - 현재 workflow.controller.ts의 findAll() + serializeWorkflow() 로직을 이동
+
+     (b) GetWorkflowQuery 작성: flow-backend/src/workflow/application/queries/get-workflow-query.ts
+         - @Injectable() 데코레이터 사용
+         - WorkflowRepository를 주입받는다
+         - execute(params: { workflowId: WorkflowId }): Promise<WorkflowReadModel> 반환
+         - 존재하지 않으면 ApplicationError('WORKFLOW_NOT_FOUND', ...) throw
+         - 현재 workflow.controller.ts의 findById() + serializeWorkflow() 로직을 이동
+
+     (c) queries/index.ts 작성: ListWorkflowsQuery, GetWorkflowQuery를 export
+
+     WorkflowReadModel 인터페이스는 queries/ 안의 별도 파일(read-models.ts)이나 query 파일 내에 정의한다.
+     현재 serializeWorkflow()의 반환 타입 구조:
+       { id, name, description, branchStrategy, status, gitRefCount, mcpServerRefCount,
+         workDefinitionCount, gitRefs: [...], mcpServerRefs: [...], workDefinitions: [...] }
+
+1-3. application/index.ts 업데이트
+     현재: export * from './use-cases/index.js';
+     변경: export * from './commands/index.js';
+     추가: export * from './queries/index.js';
+
+1-4. workflow.controller.ts 업데이트
+     (a) import 경로 변경: '../application/use-cases/...' → '../application/commands/...'
+     (b) WorkflowRepository import와 @Inject(WorkflowRepository) 제거
+     (c) ListWorkflowsQuery, GetWorkflowQuery를 import하고 생성자에 주입
+     (d) findAll()을 this.listWorkflowsQuery.execute()로 교체
+     (e) findById()를 this.getWorkflowQuery.execute({ workflowId: id })로 교체
+     (f) serializeWorkflow() private 메서드를 제거 (로직이 Query로 이동됨)
+     (g) toGitRef, toMcpServerRef, toWorkDefinition 헬퍼 메서드는 그대로 유지 (Command에서 사용)
+
+1-5. workflow.module.ts 업데이트
+     (a) import 경로 변경: '../application/use-cases/...' → '../application/commands/...'
+     (b) ListWorkflowsQuery, GetWorkflowQuery를 import하고 providers에 추가
+     (c) exports에 ListWorkflowsQuery, GetWorkflowQuery 추가 (mcp-gateway에서 사용 가능하도록)
+
+1-6. 관련 소스 import 경로 업데이트
+     아래 파일들에서 '@workflow/application/use-cases/' → '@workflow/application/commands/' 로 변경:
+       - flow-backend/src/mcp-gateway/application/tool-registrars/workflow-tools.ts (5개 import)
+
+1-7. 관련 테스트 import 경로 업데이트
+     아래 파일들에서 use-cases → commands 로 변경:
+       - flow-backend/tests/unit/application/workflow/create-workflow-use-case.test.ts
+       - flow-backend/tests/unit/application/workflow/UpdateWorkflowUseCase.test.ts
+       - flow-backend/tests/unit/application/workflow/DeleteWorkflowUseCase.test.ts
+
+1-8. 검증 실행: cd flow-backend && npm run typecheck && npm run test && npm run lint
+
+===================================================================
+===== Phase 2: git 도메인 CQRS 분리 ==============================
+===================================================================
+
+----- Phase 2 git 도메인 -----
+
+핵심 파일 (수정 대상):
+  - flow-backend/src/git/application/use-cases/ (디렉토리 전체 → commands/로 이동)
+  - flow-backend/src/git/application/index.ts
+  - flow-backend/src/git/presentation/git.controller.ts
+  - flow-backend/src/git/presentation/git.module.ts
+참조할 코드 (읽기만):
+  - flow-backend/src/git/domain/ports/git-repository.ts
+  - flow-backend/src/git/domain/entities/git.ts
+
+2-1. use-cases/ → commands/ 디렉토리 이동
+     mv flow-backend/src/git/application/use-cases flow-backend/src/git/application/commands
+
+2-2. queries/ 디렉토리 생성 및 Query Use Case 작성
+
+     (a) ListGitsQuery: flow-backend/src/git/application/queries/list-gits-query.ts
+         - GitRepository 주입
+         - execute(): Promise<GitReadModel[]> (각 항목: { id, url, localPath })
+
+     (b) GetGitQuery: flow-backend/src/git/application/queries/get-git-query.ts
+         - GitRepository 주입
+         - execute(params: { gitId: GitId }): Promise<GitReadModel>
+         - 없으면 ApplicationError('GIT_NOT_FOUND', ...) throw
+
+     (c) queries/index.ts 작성
+
+2-3. application/index.ts 업데이트
+     use-cases → commands, queries export 추가
+
+2-4. git.controller.ts 업데이트
+     (a) import 경로: use-cases → commands
+     (b) GitRepository import 및 @Inject 제거
+     (c) ListGitsQuery, GetGitQuery 주입
+     (d) findAll() → this.listGitsQuery.execute()
+     (e) findById() → this.getGitQuery.execute({ gitId: id })
+
+2-5. git.module.ts 업데이트
+     (a) import 경로: use-cases → commands
+     (b) providers에 ListGitsQuery, GetGitQuery 추가
+     (c) exports에 ListGitsQuery, GetGitQuery 추가
+
+2-6. 관련 소스 import 경로 업데이트
+     - flow-backend/src/mcp-gateway/application/tool-registrars/git-tools.ts (2개 import)
+
+2-7. 관련 테스트 import 경로 업데이트
+     - flow-backend/tests/unit/application/git/create-git-use-case.test.ts
+     - flow-backend/tests/unit/application/git/delete-git-use-case.test.ts
+
+2-8. 검증 실행: cd flow-backend && npm run typecheck && npm run test && npm run lint
+
+===================================================================
+===== Phase 3: mcp 도메인 CQRS 분리 ==============================
+===================================================================
+
+----- Phase 3 mcp 도메인 -----
+
+핵심 파일 (수정 대상):
+  - flow-backend/src/mcp/application/use-cases/ → commands/
+  - flow-backend/src/mcp/application/index.ts
+  - flow-backend/src/mcp/presentation/mcp.controller.ts
+  - flow-backend/src/mcp/presentation/mcp.module.ts
+
+3-1. use-cases/ → commands/ 디렉토리 이동
+     mv flow-backend/src/mcp/application/use-cases flow-backend/src/mcp/application/commands
+
+3-2. queries/ 디렉토리 생성
+
+     (a) ListMcpServersQuery: flow-backend/src/mcp/application/queries/list-mcp-servers-query.ts
+         - McpServerRepository 주입
+         - execute(): Promise<McpServerReadModel[]>
+         - 각 항목: { id, name, command, args, env, transportType, url }
+
+     (b) GetMcpServerQuery: flow-backend/src/mcp/application/queries/get-mcp-server-query.ts
+         - McpServerRepository 주입
+         - execute(params: { mcpServerId: McpServerId }): Promise<McpServerReadModel>
+         - 없으면 ApplicationError('MCP_SERVER_NOT_FOUND', ...) throw
+
+     (c) queries/index.ts 작성
+
+3-3. application/index.ts 업데이트
+
+3-4. mcp.controller.ts 업데이트
+     (a) import 경로: use-cases → commands
+     (b) McpServerRepository import 및 @Inject 제거
+     (c) ListMcpServersQuery, GetMcpServerQuery 주입
+     (d) findAll() → this.listMcpServersQuery.execute()
+     (e) findById() → this.getMcpServerQuery.execute({ mcpServerId: id })
+
+3-5. mcp.module.ts 업데이트
+     (a) import 경로: use-cases → commands
+     (b) providers/exports에 Query 추가
+
+3-6. 관련 소스 import 경로 업데이트
+     - flow-backend/src/mcp-gateway/application/tool-registrars/mcp-server-tools.ts (2개 import)
+
+3-7. 관련 테스트 import 경로 업데이트
+     - flow-backend/tests/unit/application/mcp/register-mcp-server-use-case.test.ts
+     - flow-backend/tests/unit/application/mcp/unregister-mcp-server-use-case.test.ts
+
+3-8. 검증 실행: cd flow-backend && npm run typecheck && npm run test && npm run lint
+
+===================================================================
+===== Phase 4: agent 도메인 CQRS 분리 ============================
+===================================================================
+
+----- Phase 4 agent 도메인 -----
+
+핵심 파일 (수정 대상):
+  - flow-backend/src/agent/application/use-cases/ → commands/
+  - flow-backend/src/agent/application/index.ts (이 파일은 개별 export 형식 — 주의)
+  - flow-backend/src/agent/presentation/agent.controller.ts
+  - flow-backend/src/agent/presentation/agent-log.controller.ts
+  - flow-backend/src/agent/presentation/agent.module.ts
+
+4-1. use-cases/ → commands/ 디렉토리 이동
+     mv flow-backend/src/agent/application/use-cases flow-backend/src/agent/application/commands
+
+4-2. queries/ 디렉토리 생성
+
+     (a) GetAgentSessionQuery: flow-backend/src/agent/application/queries/get-agent-session-query.ts
+         - AgentSessionRepository 주입
+         - execute(params: { workExecutionId: WorkExecutionId }): Promise<AgentSessionReadModel>
+         - 반환: { id, workExecutionId, workflowRunId, model, isAssigned }
+         - 없으면 ApplicationError('AGENT_SESSION_NOT_FOUND', ...) throw
+
+     (b) ListAgentLogsQuery: flow-backend/src/agent/application/queries/list-agent-logs-query.ts
+         - AgentLogRepository 주입
+         - execute(params: { workExecutionId: string }): Promise<AgentLogReadModel[]>
+         - 반환 각 항목: { id, workExecutionId, entryType, content, createdAt: string(ISO) }
+
+     (c) queries/index.ts 작성
+
+4-3. application/index.ts 업데이트
+     현재 개별 export 형식이므로 use-cases → commands 경로 변경:
+       export { StartAgentSessionUseCase } from './commands/start-agent-session-use-case.js';
+       ... (나머지도 동일)
+     queries export 추가:
+       export { GetAgentSessionQuery } from './queries/get-agent-session-query.js';
+       export { ListAgentLogsQuery } from './queries/list-agent-logs-query.js';
+
+4-4. agent.controller.ts 업데이트
+     (a) import 경로: use-cases → commands
+     (b) AgentSessionRepository import 및 @Inject 제거
+     (c) GetAgentSessionQuery 주입
+     (d) getByWorkExecutionId() → this.getAgentSessionQuery.execute({ workExecutionId: id })
+
+4-5. agent-log.controller.ts 업데이트
+     (a) AgentLogRepository import 제거
+     (b) ListAgentLogsQuery 주입
+     (c) getAll() → this.listAgentLogsQuery.execute({ workExecutionId: weId })
+     (d) stream() 메서드는 AgentLogEmitter를 직접 사용하므로 그대로 유지
+
+4-6. agent.module.ts 업데이트
+     (a) import 경로: use-cases → commands
+     (b) providers에 GetAgentSessionQuery, ListAgentLogsQuery 추가
+     (c) exports에 필요시 추가
+
+4-7. 관련 테스트 import 경로 업데이트
+     - flow-backend/tests/unit/application/agent/StartAgentSessionUseCase.test.ts
+     - flow-backend/tests/unit/application/agent/SendAgentQueryUseCase.test.ts
+     - flow-backend/tests/unit/application/agent/StopAgentSessionUseCase.test.ts
+
+4-8. 검증 실행: cd flow-backend && npm run typecheck && npm run test && npm run lint
+
+===================================================================
+===== Phase 5: workflow-runtime 도메인 CQRS 분리 =================
+===================================================================
+
+----- Phase 5 workflow-runtime 도메인 -----
+
+핵심 파일 (수정 대상):
+  - flow-backend/src/workflow-runtime/application/use-cases/ → commands/
+  - flow-backend/src/workflow-runtime/application/use-cases/index.ts → commands/index.ts
+  - flow-backend/src/workflow-runtime/application/index.ts
+  - flow-backend/src/workflow-runtime/application/event-handlers/ (6개 파일 — 상대 경로 import 수정)
+  - flow-backend/src/workflow-runtime/presentation/workflow-runtime.controller.ts
+  - flow-backend/src/workflow-runtime/presentation/report.controller.ts
+  - flow-backend/src/workflow-runtime/presentation/workflow-runtime.module.ts
+참조할 코드 (읽기만):
+  - flow-backend/src/workflow-runtime/domain/ports/workflow-run-repository.ts
+  - flow-backend/src/workflow-runtime/domain/ports/checkpoint-repository.ts
+  - flow-backend/src/workflow-runtime/domain/ports/report-repository.ts
+  - flow-backend/src/workflow-runtime/domain/ports/file-system.ts
+  - flow-backend/src/workflow-runtime/domain/entities/workflow-run.ts
+
+5-1. use-cases/ → commands/ 디렉토리 이동
+     mv flow-backend/src/workflow-runtime/application/use-cases flow-backend/src/workflow-runtime/application/commands
+
+5-2. event-handlers/ 내부의 상대 import 경로 업데이트
+     이벤트 핸들러들이 '../use-cases/...' 상대 경로를 사용하므로 '../commands/...'로 변경:
+       - work-execution-started-handler.ts: '../use-cases/send-query-use-case.js' → '../commands/send-query-use-case.js'
+       - query-responded-handler.ts: '../use-cases/complete-task-execution-use-case.js', '../use-cases/send-query-use-case.js' → '../commands/...'
+       - workflow-run-started-handler.ts: '../use-cases/start-next-work-execution-use-case.js' → '../commands/...'
+       - work-execution-completed-handler.ts: '../use-cases/start-next-work-execution-use-case.js' → '../commands/...'
+       - workflow-deleted-handler.ts: '../use-cases/cancel-workflow-run-use-case.js' → '../commands/...'
+       - report-generated-handler.ts: '../use-cases/complete-task-execution-use-case.js', '../use-cases/send-query-use-case.js' → '../commands/...'
+
+5-3. queries/ 디렉토리 생성
+
+     (a) ListWorkflowRunsQuery: flow-backend/src/workflow-runtime/application/queries/list-workflow-runs-query.ts
+         - WorkflowRunRepository, WorkflowConfigReader 주입
+         - execute(): Promise<WorkflowRunListItem[]>
+         - 현재 controller의 list() 로직을 이동 (serializeRun + workflowName 조합)
+
+     (b) GetWorkflowRunQuery: flow-backend/src/workflow-runtime/application/queries/get-workflow-run-query.ts
+         - WorkflowRunRepository 주입
+         - execute(params: { workflowRunId: WorkflowRunId }): Promise<WorkflowRunReadModel>
+         - 없으면 NotFoundException throw
+         - 현재 controller의 getById() + serializeRun() 로직을 이동
+
+     (c) GetWorkflowRunSummaryQuery: flow-backend/src/workflow-runtime/application/queries/get-workflow-run-summary-query.ts
+         - WorkflowRunRepository 주입
+         - execute(): Promise<WorkflowRunSummary>
+         - 현재 controller의 getSummary() 로직을 이동
+         - 반환: { initialized, running, paused, awaiting, completed, cancelled }
+
+     (d) ListCheckpointsQuery: flow-backend/src/workflow-runtime/application/queries/list-checkpoints-query.ts
+         - CheckpointRepository 주입
+         - execute(params: { workflowRunId: WorkflowRunId }): Promise<CheckpointReadModel[]>
+         - 현재 controller의 getCheckpoints() 로직을 이동
+
+     (e) GetReportQuery: flow-backend/src/workflow-runtime/application/queries/get-report-query.ts
+         - ReportRepository, FileSystem 주입
+         - execute(params: { workExecutionId: WorkExecutionId }): Promise<{ content: string }>
+         - 현재 report.controller.ts의 getByWorkExecutionId() 로직을 이동
+         - ReportStatus import: '../domain/index.js'에서 가져오기
+
+     (f) queries/index.ts 작성 (5개 Query 전부 export)
+
+     serializeRun()은 Query 내부에 private 메서드 또는 별도 함수로 이동한다.
+
+5-4. application/index.ts 업데이트
+     use-cases → commands, queries export 추가
+
+5-5. workflow-runtime.controller.ts 업데이트
+     (a) import 경로: '../application/use-cases/...' → '../application/commands/...' (8개 command import)
+     (b) WorkflowRunRepository, CheckpointRepository, WorkflowConfigReader import 및 @Inject 제거
+     (c) ListWorkflowRunsQuery, GetWorkflowRunQuery, GetWorkflowRunSummaryQuery, ListCheckpointsQuery 주입
+     (d) list() → this.listWorkflowRunsQuery.execute()
+     (e) getSummary() → this.getWorkflowRunSummaryQuery.execute()
+     (f) getById() → this.getWorkflowRunQuery.execute({ workflowRunId: id })
+     (g) getCheckpoints() → this.listCheckpointsQuery.execute({ workflowRunId: id })
+     (h) serializeRun() private 메서드 제거 (Query로 이동됨)
+
+5-6. report.controller.ts 업데이트
+     (a) ReportRepository, FileSystem import 및 @Inject 제거
+     (b) GetReportQuery 주입
+     (c) getByWorkExecutionId() → this.getReportQuery.execute({ workExecutionId })
+     (d) ReportStatus import 제거
+
+5-7. workflow-runtime.module.ts 업데이트
+     (a) import 경로: '../application/use-cases/...' → '../application/commands/...' (12개 import)
+     (b) 5개 Query를 import하고 providers에 추가
+     (c) 필요시 exports에 추가
+
+5-8. 관련 소스 import 경로 업데이트
+     - flow-backend/src/mcp-gateway/application/tool-registrars/workflow-run-tools.ts
+       '@workflow-runtime/application/use-cases/...' → '@workflow-runtime/application/commands/...' (5개 import)
+
+5-9. 관련 테스트 import 경로 업데이트
+     - flow-backend/tests/unit/application/workflow-runtime/start-workflow-run-use-case.test.ts
+     - flow-backend/tests/unit/application/workflow-runtime/SendQueryUseCase.test.ts
+     - flow-backend/tests/unit/application/workflow-runtime/PauseWorkflowRunUseCase.test.ts
+     - flow-backend/tests/unit/application/workflow-runtime/ResumeWorkflowRunUseCase.test.ts
+     - flow-backend/tests/unit/application/workflow-runtime/CompleteTaskExecutionUseCase.test.ts
+     - flow-backend/tests/unit/application/workflow-runtime/StartNextWorkExecutionUseCase.test.ts
+     - flow-backend/tests/unit/application/workflow-runtime/cancel-workflow-run-use-case.test.ts
+     - flow-backend/tests/unit/application/workflow-runtime/DeleteWorkflowRunUseCase.test.ts
+
+5-10. 검증 실행: cd flow-backend && npm run typecheck && npm run test && npm run lint
+
+===================================================================
+===== Phase 6: 통합 테스트 및 mcp-gateway 최종 점검 ==============
+===================================================================
+
+----- Phase 6 통합 점검 -----
+
+6-1. 통합 테스트 import 경로 업데이트
+     아래 통합 테스트 파일에서 use-cases → commands 경로 변경:
+       - flow-backend/tests/integration/app.integration.test.ts
+       - flow-backend/tests/integration/workflow-git-cascade.test.ts
+       - flow-backend/tests/integration/mcp-lifecycle.test.ts
+       - flow-backend/tests/integration/git-lifecycle.test.ts
+     각 파일을 읽고, use-cases가 포함된 import를 모두 commands로 변경한다.
+
+6-2. mcp-gateway tool registrars 추가 점검
+     Phase 1~5에서 이미 변경했지만, 누락된 import가 없는지 재확인한다:
+       - flow-backend/src/mcp-gateway/application/tool-registrars/workflow-tools.ts
+       - flow-backend/src/mcp-gateway/application/tool-registrars/workflow-run-tools.ts
+       - flow-backend/src/mcp-gateway/application/tool-registrars/git-tools.ts
+       - flow-backend/src/mcp-gateway/application/tool-registrars/mcp-server-tools.ts
+     이 파일들도 컨트롤러처럼 직접 repository를 호출하고 있다.
+     mcp-gateway의 repository 직접 호출은 이번 리팩터링에서 유지한다 (별도 모듈이므로).
+
+6-3. 전체 소스에서 'use-cases' 잔여 참조 검색
+     grep으로 flow-backend/src/ 및 flow-backend/tests/ 디렉토리에서
+     'use-cases'가 포함된 import 라인을 검색한다.
+     발견되면 commands로 수정한다.
+
+6-4. 전체 검증 실행: cd flow-backend && npm run typecheck && npm run test && npm run lint
+
+===================================================================
+===== Phase 7: 최종 통합 검증 ====================================
+===================================================================
+
+----- Phase 7 통합 검증 -----
+
+7-1. 빌드 검증
+     cd flow-backend && npm run build
+     빌드 결과물(dist/)이 정상적으로 생성되는지 확인한다.
+
+7-2. 서버 기동 검증
+     cd flow-backend && npm run build && timeout 10 npm run start || true
+     서버가 정상 기동되면 3초 후 종료한다 (NestJS 부트스트랩 로그 확인).
+
+7-3. 디렉토리 구조 검증
+     아래 구조가 올바르게 생성되었는지 확인한다:
+       flow-backend/src/workflow/application/commands/ (5개 파일 + index.ts)
+       flow-backend/src/workflow/application/queries/ (2개 파일 + index.ts)
+       flow-backend/src/git/application/commands/ (3개 파일 + index.ts)
+       flow-backend/src/git/application/queries/ (2개 파일 + index.ts)
+       flow-backend/src/mcp/application/commands/ (3개 파일 + index.ts)
+       flow-backend/src/mcp/application/queries/ (2개 파일 + index.ts)
+       flow-backend/src/agent/application/commands/ (3개 파일)
+       flow-backend/src/agent/application/queries/ (2개 파일 + index.ts)
+       flow-backend/src/workflow-runtime/application/commands/ (12개 파일 + index.ts)
+       flow-backend/src/workflow-runtime/application/queries/ (5개 파일 + index.ts)
+     use-cases/ 디렉토리가 어떤 도메인에도 남아있지 않은지 확인한다.
+
+7-4. 잔여 use-cases 참조 최종 확인
+     grep -r "use-cases" flow-backend/src/ flow-backend/tests/
+     결과가 0건이어야 한다 (주석이나 문자열 리터럴 제외).
+
+7-5. 최종 검증
+     cd flow-backend && npm run typecheck && npm run test && npm run lint
+
+모든 Phase가 완료되고 전체 검증이 통과하면 {CQRS_SEPARATION_COMPLETE} 를 출력한다.

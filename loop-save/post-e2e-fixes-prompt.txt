@@ -1,0 +1,258 @@
+E2E 테스트 후 발견된 5가지 이슈를 수정한다: 워크플로우 재실행 불가, 에이전트 세션 페이지 제거, cleanup 비활성화, .env 관리 도입.
+도메인 엔티티(value-objects, entities)의 기존 비즈니스 로직은 변경하지 않는다.
+flow-front/CLAUDE.md와 flow-backend/CLAUDE.md의 모든 규칙을 준수한다.
+
+수정할 이슈 목록:
+  이슈1. 동일 issueKey로 워크플로우 재실행 시 브랜치 충돌로 실패
+  이슈2. 에이전트 세션 직접 대화 페이지 및 관련 코드 제거
+  이슈3. 워크플로우 실행 완료 후 workspace/worktree 디렉토리 자동 cleanup 비활성화
+  이슈4. 환경변수를 .env 파일로 관리하도록 변경
+  이슈5. .env.example 파일 작성
+
+아래 5개 Phase를 순서대로 진행한다.
+각 Phase 완료 후 반드시 아래 검증을 실행한다. 검증 실패 시 수정 후 다시 검증한다. 검증 통과 후 다음 Phase로 진행한다.
+  백엔드 검증: cd flow-backend && npm run typecheck && npm run test && npm run lint
+  프론트엔드 검증: cd flow-front && npx tsc -b && npm run lint && npm run build
+각 Phase 완료 후 Playwright MCP를 통해 localhost:5173에 접속하여 실제 화면을 확인하고 문제가 있으면 즉시 수정한다.
+
+----- Phase 1 워크플로우 재실행 불가 수정 (이슈1) -----
+
+핵심 파일:
+  - flow-backend/src/common/ports/git-service.ts
+  - flow-backend/src/git/infra/git-service-impl.ts
+  - flow-backend/src/workflow-runtime/application/use-cases/start-workflow-run-use-case.ts
+참조할 코드 (읽기만, 수정하지 않음):
+  - flow-backend/src/git/domain/ports/git-client.ts (GitClient 추상 클래스 — branchExists, deleteBranch, deleteWorktree 메서드 이미 존재)
+  - flow-backend/src/git/infra/cli-git-client.ts (CliGitClient 구현체 — 위 메서드 구현 완료)
+  - flow-backend/src/git/infra/in-memory-git-client.ts (InMemoryGitClient — 위 메서드 구현 완료)
+
+문제 원인:
+  StartWorkflowRunUseCase.execute()에서 gitService.createWorktree()를 호출할 때,
+  이미 feature/{issueKey} 브랜치가 존재하면 `git worktree add -b` 명령이 실패한다.
+  GitClient에 branchExists()와 deleteBranch() 메서드가 있지만,
+  GitService 추상 클래스와 GitServiceImpl에는 이 메서드가 노출되어 있지 않다.
+
+1-1. GitService 추상 클래스에 메서드 추가
+     flow-backend/src/common/ports/git-service.ts에 다음 추상 메서드 3개를 추가한다:
+       abstract branchExists(repoPath: string, branch: string): Promise<boolean>;
+       abstract deleteBranch(repoPath: string, branch: string): Promise<void>;
+       abstract fetch(repoPath: string): Promise<void>;
+
+1-2. GitServiceImpl에 구현 추가
+     flow-backend/src/git/infra/git-service-impl.ts에 위 3개 메서드의 구현을 추가한다.
+     각 메서드는 this.gitClient의 동일 이름 메서드를 호출하면 된다.
+
+1-3. StartWorkflowRunUseCase에서 브랜치 충돌 처리
+     flow-backend/src/workflow-runtime/application/use-cases/start-workflow-run-use-case.ts의
+     createWorktree 호출 직전 (현재 106행 부근)에 다음 로직을 추가한다:
+       - gitService.fetch(gitInfo.localPath)로 원격 정보를 최신화한다
+       - gitService.branchExists(gitInfo.localPath, resolvedBranchName)로 브랜치 존재 여부를 확인한다
+       - 브랜치가 존재하면:
+         a. gitService.deleteWorktree(gitInfo.localPath, workTreePath)를 try-catch로 호출하여 잔여 worktree를 정리한다 (없으면 무시)
+         b. gitService.deleteBranch(gitInfo.localPath, resolvedBranchName)로 기존 브랜치를 삭제한다
+       - 이후 기존 createWorktree 로직을 그대로 실행한다
+
+1-4. 테스트 수정
+     start-workflow-run-use-case.test.ts에서 gitService mock에 branchExists, deleteBranch, fetch를 추가한다.
+     기존 테스트는 branchExists가 false를 반환하도록 설정한다.
+     새 테스트를 추가한다: "이미 브랜치가 존재하면 삭제 후 worktree를 생성한다"
+       - branchExists가 true를 반환하도록 설정
+       - deleteBranch가 호출되었는지 검증
+       - createWorktree가 정상 호출되었는지 검증
+
+1-5. 검증 실행
+     cd flow-backend && npm run typecheck && npm run test && npm run lint
+
+----- Phase 2 에이전트 세션 페이지 제거 (이슈2) -----
+
+핵심 파일 (삭제 대상):
+  - flow-front/src/pages/AgentSessionPage.tsx — 파일 전체 삭제
+  - flow-front/src/hooks/useAgentSession.ts — 파일 전체 삭제
+  - flow-front/src/api/agent-sessions.ts — 파일 전체 삭제
+핵심 파일 (수정 대상):
+  - flow-front/src/App.tsx
+  - flow-front/src/api/types.ts
+  - flow-front/src/lib/query-keys.ts
+  - flow-front/src/components/flow/panels/RunOverviewPanel.tsx
+
+2-1. 3개 파일 삭제
+     아래 파일을 삭제한다:
+       flow-front/src/pages/AgentSessionPage.tsx
+       flow-front/src/hooks/useAgentSession.ts
+       flow-front/src/api/agent-sessions.ts
+
+2-2. App.tsx 수정
+     flow-front/src/App.tsx에서:
+       - 10행의 AgentSessionPage import 문을 제거한다
+       - 30행의 <Route path="/workflow-runs/:id/agent" element={<AgentSessionPage />} /> 를 제거한다
+
+2-3. types.ts 수정
+     flow-front/src/api/types.ts에서:
+       - "// ─── Agent Session ───" 주석부터 QueryResultResponse 인터페이스 끝까지 (250~263행) 제거한다
+       - 구체적으로 제거할 내용:
+         // ─── Agent Session ───
+         export interface AgentSessionResponse { ... }
+         export interface QueryResultResponse { ... }
+
+2-4. query-keys.ts 수정
+     flow-front/src/lib/query-keys.ts에서:
+       - agentSessions 객체 (18~20행) 제거한다:
+         agentSessions: {
+           detail: (workExecutionId: string) => ['agent-sessions', workExecutionId] as const,
+         },
+
+2-5. RunOverviewPanel.tsx 수정
+     flow-front/src/components/flow/panels/RunOverviewPanel.tsx에서:
+       - 8행의 import에서 MessageCircle을 제거한다 (다른 아이콘은 유지)
+       - 117~125행의 "에이전트 세션" 버튼 블록을 제거한다:
+         <Button variant="outline" size="sm" className="w-full"
+           onClick={() => navigate(`/workflow-runs/${runId}/agent`)}>
+           <MessageCircle className="mr-1 h-4 w-4" />
+           에이전트 세션
+         </Button>
+       - 버튼 제거 후 navigate import가 다른 곳에서 사용되지 않으면 navigate 관련 코드도 제거한다.
+         useNavigate import와 const navigate = useNavigate() 선언을 확인하고 불필요하면 제거한다.
+
+2-6. 삭제된 파일을 import하는 곳이 없는지 확인
+     프로젝트 전체에서 AgentSessionPage, useAgentSession, agent-sessions (API 모듈)를 grep 한다.
+     발견되면 해당 import도 제거한다.
+
+2-7. 검증 실행
+     cd flow-front && npx tsc -b && npm run lint && npm run build
+
+----- Phase 3 워크플로우 디렉토리 cleanup 비활성화 (이슈3) -----
+
+핵심 파일:
+  - flow-backend/src/workflow-runtime/application/event-handlers/workflow-run-terminated-handler.ts
+  - flow-backend/src/workflow-runtime/application/use-cases/cleanup-workspaces-use-case.ts
+  - flow-backend/src/workflow-runtime/presentation/workflow-runtime.module.ts
+
+문제 원인:
+  1. WorkflowRunTerminatedHandler가 COMPLETED/CANCELLED 이벤트 발생 시 즉시 worktree/workspace 디렉토리를 삭제한다.
+  2. CleanupWorkspacesUseCase가 1시간 주기 스케줄러로 terminal 상태 런의 디렉토리를 삭제한다.
+  실행 결과물을 확인하려면 디렉토리가 보존되어야 한다.
+
+3-1. WorkflowRunTerminatedHandler에서 디렉토리 삭제 로직 제거
+     flow-backend/src/workflow-runtime/application/event-handlers/workflow-run-terminated-handler.ts에서:
+       - handle() 메서드의 본문을 빈 메서드로 변경한다 (no-op).
+       - 즉, 이벤트를 수신하되 아무 cleanup도 하지 않는다.
+       - 생성자의 workTreeRepository, workflowSpaceRepository, fileSystem 의존성을 제거한다.
+       - workflowRunRepository도 불필요하므로 제거한다.
+       - 핸들러 자체가 불필요해졌으므로, 파일 내용을 최소화하거나
+         workflow-runtime.module.ts에서 이벤트 구독(WorkflowRunCompleted, WorkflowRunCancelled → wrTerminatedHandler)을 제거하는 것이 더 깔끔하다.
+       - 방법: workflow-runtime.module.ts에서 150~156행의 두 subscribe 호출을 제거하고,
+         WorkflowRunTerminatedHandler import, providers 등록(102행), 생성자 주입(125행)도 제거한다.
+         WorkflowRunCompleted, WorkflowRunCancelled import에서 사용처가 없으면 import도 정리한다.
+
+3-2. CleanupWorkspacesUseCase 및 스케줄러 제거
+     flow-backend/src/workflow-runtime/presentation/workflow-runtime.module.ts에서:
+       - 176~182행의 setInterval 스케줄러를 제거한다.
+       - CleanupWorkspacesUseCase의 import(40행), providers 등록(97행), 생성자 주입(130행)을 제거한다.
+     flow-backend/src/workflow-runtime/application/use-cases/cleanup-workspaces-use-case.ts 파일을 삭제한다.
+
+3-3. DeleteWorkflowRunUseCase 확인
+     flow-backend/src/workflow-runtime/application/use-cases/delete-workflow-run-use-case.ts를 읽고,
+     이 유스케이스에서 디렉토리를 삭제하는 로직이 있다면 그것은 유지한다.
+     (사용자가 명시적으로 "삭제" 버튼을 누를 때만 정리되도록)
+
+3-4. 관련 테스트 수정
+     삭제된 파일/핸들러를 참조하는 테스트가 있는지 확인한다.
+     cleanup-workspaces-use-case.test.ts가 있으면 삭제한다.
+     workflow-run-terminated-handler.test.ts가 있으면 삭제한다.
+
+3-5. 검증 실행
+     cd flow-backend && npm run typecheck && npm run test && npm run lint
+
+----- Phase 4 .env 파일 관리 도입 및 경로 기본값 변경 (이슈4, 이슈5) -----
+
+핵심 파일:
+  - flow-backend/package.json (dotenv 의존성 추가)
+  - flow-backend/src/main.ts (dotenv 로드)
+  - flow-backend/src/common/utils/paths.ts (경로 기본값 변경)
+  - flow-backend/src/app.module.ts (USE_DB 기본값 확인)
+  - flow-backend/.env.example (신규 생성)
+  - flow-backend/.gitignore (.env 추가)
+
+4-1. dotenv 패키지 설치
+     flow-backend/package.json의 dependencies에 dotenv를 추가한다.
+     npm install dotenv 를 실행한다.
+
+4-2. main.ts에서 dotenv 로드
+     flow-backend/src/main.ts의 최상단 (import 'reflect-metadata' 다음)에 다음을 추가한다:
+       import 'dotenv/config';
+     이렇게 하면 .env 파일이 자동으로 로드된다.
+     NestJS 모듈 시스템(@nestjs/config)은 사용하지 않는다 — 단순 dotenv로 충분하다.
+
+4-3. 경로 기본값을 프로젝트 루트 기준 상대경로로 변경
+     flow-backend/src/common/utils/paths.ts의 tempBasePath 함수를 수정한다.
+     현재 코드:
+       return process.env[envKey] ?? join(tmpdir(), subDir);
+     변경 후:
+       return process.env[envKey] ?? join(process.cwd(), subDir);
+     이렇게 하면 환경변수 미설정 시 OS 임시 디렉토리 대신 프로젝트 루트 하위에 생성된다.
+     예: flow-backend/flowflow-repos, flow-backend/workflow-spaces
+
+4-4. .gitignore에 .env 및 런타임 디렉토리 추가
+     flow-backend/.gitignore에 다음을 추가한다:
+       .env
+       flowflow-repos/
+       workflow-spaces/
+
+4-5. .env.example 작성
+     flow-backend/.env.example 파일을 새로 생성한다. 내용:
+
+       # ── Database ──
+       # USE_DB=true 면 PostgreSQL 사용, false 면 인메모리 레포지토리 사용
+       USE_DB=false
+
+       # PostgreSQL 접속 설정 (USE_DB=true 일 때만 사용)
+       DB_HOST=localhost
+       DB_PORT=5432
+       DB_USERNAME=postgres
+       DB_PASSWORD=postgres
+       DB_DATABASE=workflow_backend
+       DB_LOGGING=false
+
+       # ── File Paths ──
+       # Git 레포 클론 저장 경로 (기본: ./flowflow-repos)
+       # GIT_REPOS_BASE_PATH=./flowflow-repos
+
+       # 워크플로우 실행 워크스페이스 경로 (기본: ./workflow-spaces)
+       # WORKFLOW_SPACES_PATH=./workflow-spaces
+
+4-6. 검증 실행
+     cd flow-backend && npm run typecheck && npm run test && npm run lint
+
+----- Phase 5 통합 검증 -----
+
+5-1. 백엔드 빌드 및 서버 기동
+     cd flow-backend && npm run build
+     USE_DB=false npm run start 로 서버를 기동한다.
+     .env 파일이 없어도 기본값으로 정상 기동되는지 확인한다.
+
+5-2. 디렉토리 경로 확인
+     서버 기동 후 flow-backend/ 하위에 flowflow-repos, workflow-spaces 디렉토리가 사용되는지 확인한다.
+     (Git 레포 등록 시 flow-backend/flowflow-repos/ 하위에 클론되어야 한다)
+
+5-3. 에이전트 세션 페이지 제거 확인
+     Playwright MCP를 통해 localhost:5173에 접속한다.
+     /workflow-runs/{id}/agent 경로로 직접 접근 시 404 또는 빈 페이지가 되는지 확인한다.
+     워크플로우 실행 화면에서 "에이전트 세션" 버튼이 사라졌는지 확인한다.
+
+5-4. 워크플로우 재실행 테스트
+     다음 시나리오를 REST API로 실행한다:
+     a. Git 레포 등록
+     b. MCP 서버 등록
+     c. 워크플로우 생성 및 활성화
+     d. 워크플로우 실행 (issueKey: TEST-1) — RUNNING 확인
+     e. 실행 완료 또는 취소 후, 동일 issueKey로 재실행 — 에러 없이 RUNNING 진입 확인
+     (이전에는 "branch already exists" 에러 발생)
+
+5-5. cleanup 비활성화 확인
+     워크플로우 실행 완료 후 workflow-spaces/{runId}/ 디렉토리가 삭제되지 않고 남아있는지 확인한다.
+
+5-6. 최종 검증
+     cd flow-backend && npm run typecheck && npm run test && npm run lint
+     cd flow-front && npx tsc -b && npm run lint && npm run build
+
+모든 Phase가 완료되고 전체 시나리오 검증이 통과하면 POST-E2E FIXES COMPLETE 를 출력한다.

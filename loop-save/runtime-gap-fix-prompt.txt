@@ -1,0 +1,203 @@
+워크플로우 런타임의 백엔드 유스케이스 중 UI에 노출되지 않는 6개 갭을 수정한다.
+백엔드 도메인 로직은 이미 완성되어 있으므로 도메인 레이어는 절대 수정하지 않는다.
+수정 범위는 백엔드 Presentation 레이어(DTO, Controller)와 프론트엔드(타입, API, UI)이다.
+flow-front/CLAUDE.md와 flow-backend/CLAUDE.md의 모든 규칙을 준수한다.
+
+수정할 갭 목록:
+  갭1. issueKey가 런타임 응답에 없음 — serializeRun()에서 누락
+  갭2. Edit Work Node에 gitRefConfigs/mcpServerRefConfigs 미전달 — DTO→Controller→프론트 전체 누락
+  갭3. Add Work Node에 gitRefConfigs/mcpServerRefConfigs 미전달 — 동일
+  갭4. gitRefPool/mcpServerRefPool이 런타임 응답에 없음 — 프론트가 사용 가능 리소스 목록을 모름
+  갭5. WorkNodeConfig별 gitRefConfigs/mcpServerRefConfigs가 응답에 없음
+  갭6. TaskNodeConfig의 reportOutline이 런타임 응답에 없음
+
+아래 4개 Phase를 순서대로 진행한다.
+각 Phase 완료 후 반드시 아래 검증을 실행한다. 검증 실패 시 수정 후 다시 검증한다. 검증 통과 후 다음 Phase로 진행한다.
+  백엔드 검증: cd flow-backend && npm run typecheck && npm run test && npm run lint
+  프론트엔드 검증: cd flow-front && npx tsc -b && npm run lint && npm run build
+각 Phase 완료 후 Playwright MCP를 통해 localhost:5173에 접속하여 실제 화면을 확인하고 문제가 있으면 즉시 수정한다.
+
+----- Phase 1 백엔드 Controller/DTO 수정 -----
+
+핵심 파일:
+  - flow-backend/src/workflow-runtime/presentation/workflow-runtime.controller.ts
+  - flow-backend/src/workflow-runtime/presentation/dto/edit-work-node-config.dto.ts
+  - flow-backend/src/workflow-runtime/presentation/dto/add-work-node.dto.ts
+참조할 도메인 코드 (읽기만, 수정하지 않음):
+  - flow-backend/src/workflow-runtime/domain/entities/workflow-run.ts
+  - flow-backend/src/workflow-runtime/domain/value-objects/work-node-config.ts (gitRefConfigs, mcpServerRefConfigs 포함)
+  - flow-backend/src/workflow-runtime/domain/value-objects/task-node-config.ts (reportOutline 포함)
+  - flow-backend/src/workflow-runtime/domain/value-objects/git-ref-node-config.ts (gitId, baseBranch)
+  - flow-backend/src/workflow-runtime/domain/value-objects/mcp-server-ref-node-config.ts (mcpServerId, envOverrides)
+  - flow-backend/src/workflow-runtime/application/use-cases/edit-work-node-config-use-case.ts (EditWorkNodeConfigCommand 정의)
+  - flow-backend/src/workflow-runtime/application/use-cases/add-work-node-use-case.ts (AddWorkNodeCommand 정의)
+
+1-1. serializeRun() 확장 (갭1, 갭4, 갭5, 갭6 해결)
+     workflow-runtime.controller.ts의 serializeRun 메서드에 다음 필드를 추가한다:
+     - 최상위에 issueKey: run.issueKey 추가
+     - 최상위에 gitRefPool: run.gitRefPool을 { gitId, baseBranch } 배열로 직렬화
+     - 최상위에 mcpServerRefPool: run.mcpServerRefPool을 { mcpServerId, envOverrides } 배열로 직렬화
+     - workNodeConfigs 매핑에 gitRefConfigs: c.gitRefConfigs를 { gitId, baseBranch } 배열로 직렬화
+     - workNodeConfigs 매핑에 mcpServerRefConfigs: c.mcpServerRefConfigs를 { mcpServerId, envOverrides } 배열로 직렬화
+     - taskConfigs 매핑에 hasReportOutline: tc.requiresReport() 추가
+
+1-2. list() 응답에도 issueKey 추가
+     list() 메서드의 serialized 매핑에 issueKey: run.issueKey 추가 (현재 serializeRun 결과에 workflowName만 추가하고 있음)
+
+1-3. EditWorkNodeConfigDto 확장 (갭2 해결)
+     edit-work-node-config.dto.ts에 다음 필드 추가:
+     - gitRefConfigs?: { gitId: string; baseBranch: string }[] (IsOptional, IsArray, ValidateNested)
+     - mcpServerRefConfigs?: { mcpServerId: string; envOverrides?: Record<string, string> }[] (IsOptional, IsArray, ValidateNested)
+     중첩 DTO 클래스로 GitRefNodeConfigDto와 McpServerRefNodeConfigDto를 같은 파일 내에 정의한다.
+
+1-4. Controller editWorkNodeConfig에서 새 필드를 use case로 전달 (갭2 해결)
+     workflow-runtime.controller.ts의 editWorkNodeConfig 메서드에서:
+     - dto.gitRefConfigs가 있으면 GitRefNodeConfig.create()로 변환하여 command에 전달
+     - dto.mcpServerRefConfigs가 있으면 McpServerRefNodeConfig.create()로 변환하여 command에 전달
+     도메인 value object import 추가: GitRefNodeConfig, McpServerRefNodeConfig
+
+1-5. AddWorkNodeDto 확장 (갭3 해결)
+     add-work-node.dto.ts에 동일하게:
+     - gitRefConfigs?: { gitId: string; baseBranch: string }[] (IsOptional)
+     - mcpServerRefConfigs?: { mcpServerId: string; envOverrides?: Record<string, string> }[] (IsOptional)
+     1-3에서 만든 GitRefNodeConfigDto, McpServerRefNodeConfigDto를 import하여 재사용한다.
+
+1-6. Controller addWorkNode에서 새 필드를 use case로 전달 (갭3 해결)
+     workflow-runtime.controller.ts의 addWorkNode 메서드에서:
+     - dto.gitRefConfigs가 있으면 GitRefNodeConfig.create()로 변환하여 command에 전달
+     - dto.mcpServerRefConfigs가 있으면 McpServerRefNodeConfig.create()로 변환하여 command에 전달
+
+1-7. 백엔드 검증 실행
+
+----- Phase 2 프론트엔드 타입/API 동기화 -----
+
+핵심 파일:
+  - flow-front/src/api/types.ts
+  - flow-front/src/api/workflow-runs.ts
+  - flow-front/src/components/flow/types.ts
+
+2-1. types.ts 응답 타입 확장
+     WorkflowRunDetailResponse에 추가:
+       issueKey: string;
+       gitRefPool: { gitId: string; baseBranch: string }[];
+       mcpServerRefPool: { mcpServerId: string; envOverrides: Record<string, string> }[];
+
+     WorkflowRunListItem에 추가:
+       issueKey: string;
+
+     WorkNodeConfigSummary에 추가:
+       gitRefConfigs: { gitId: string; baseBranch: string }[];
+       mcpServerRefConfigs: { mcpServerId: string; envOverrides: Record<string, string> }[];
+
+     TaskNodeConfigInput에 추가:
+       hasReportOutline: boolean;
+
+2-2. types.ts 요청 타입 확장
+     GitRefNodeConfigInput 인터페이스 신규 정의:
+       gitId: string;
+       baseBranch: string;
+
+     McpServerRefNodeConfigInput 인터페이스 신규 정의:
+       mcpServerId: string;
+       envOverrides?: Record<string, string>;
+
+     EditWorkNodeConfigRequest에 추가:
+       gitRefConfigs?: GitRefNodeConfigInput[];
+       mcpServerRefConfigs?: McpServerRefNodeConfigInput[];
+
+     AddWorkNodeRequest에 추가:
+       gitRefConfigs?: GitRefNodeConfigInput[];
+       mcpServerRefConfigs?: McpServerRefNodeConfigInput[];
+
+2-3. WorkNodeData 타입 확장 (flow/types.ts)
+     WorkNodeData에 추가:
+       gitRefCount?: number;
+       mcpServerRefCount?: number;
+
+     TaskNodeData에서 hasReportOutline을 활용 — 이미 존재하므로 변경 불필요.
+
+2-4. 프론트엔드 검증 실행
+
+----- Phase 3 프론트엔드 UI 확장 -----
+
+핵심 파일:
+  - flow-front/src/components/flow/panels/RunOverviewPanel.tsx
+  - flow-front/src/components/flow/panels/RuntimeWorkNodePanel.tsx
+  - flow-front/src/components/flow/hooks/useWorkflowRunToFlow.ts
+  - flow-front/src/components/flow/nodes/WorkNode.tsx
+  - flow-front/src/components/flow/nodes/TaskNode.tsx
+
+3-1. RunOverviewPanel에 issueKey 표시 (갭1 UI)
+     RunOverviewPanel의 props에 issueKey를 전달받거나, 이미 전달받는 runDetail에서 issueKey를 읽는다.
+     (runDetail은 WorkflowRunDetailResponse 타입이므로 Phase 2에서 issueKey가 추가됨)
+     진행률 섹션 위에 이슈키 표시:
+       <div>
+         <p className="text-sm text-muted-foreground">이슈 키</p>
+         <p className="text-sm font-medium">{runDetail.issueKey}</p>
+       </div>
+
+3-2. RuntimeWorkNodePanel에 Git/MCP 선택 UI 추가 (갭2, 갭3 UI)
+     RuntimeWorkNodePanel의 props를 확장:
+       gitRefPool: { gitId: string; baseBranch: string }[];
+       mcpServerRefPool: { mcpServerId: string; envOverrides: Record<string, string> }[];
+     폼 defaultValues에 추가:
+       gitRefConfigs: nodeConfig의 gitRefConfigs에서 초기화 (없으면 빈 배열)
+       mcpServerRefConfigs: nodeConfig의 mcpServerRefConfigs에서 초기화 (없으면 빈 배열)
+     폼 UI에 체크박스 목록으로 Git Ref 선택기 추가:
+       gitRefPool의 각 항목을 체크박스로 표시. gitId(또는 연결된 Git URL)와 baseBranch를 레이블로 사용.
+       선택/해제 시 gitRefConfigs 배열을 업데이트.
+     폼 UI에 체크박스 목록으로 MCP Server 선택기 추가:
+       mcpServerRefPool의 각 항목을 체크박스로 표시. mcpServerId를 레이블로 사용.
+       선택/해제 시 mcpServerRefConfigs 배열을 업데이트.
+     handleSubmit에서 gitRefConfigs와 mcpServerRefConfigs를 onEdit/onAdd 콜백에 포함.
+
+3-3. WorkflowRunFlowPage에서 RuntimeWorkNodePanel에 리소스 풀 전달
+     WorkflowRunFlowPage.tsx에서 RuntimeWorkNodePanel을 렌더링할 때 runDetail의 gitRefPool과 mcpServerRefPool을 props로 전달한다.
+
+3-4. useWorkflowRunToFlow에서 리소스 정보 노드 데이터에 반영
+     useWorkflowRunToFlow.ts에서 Work 노드 생성 시:
+       gitRefCount: nodeConfig?.gitRefConfigs?.length ?? 0
+       mcpServerRefCount: nodeConfig?.mcpServerRefConfigs?.length ?? 0
+     Task 노드 생성 시:
+       hasReportOutline: taskConfig?.hasReportOutline ?? false (현재 하드코딩된 false를 데이터에서 읽도록 수정)
+
+3-5. WorkNode 컴포넌트에 리소스 뱃지 표시
+     WorkNode.tsx에서 Git/MCP 카운트가 0보다 클 때 작은 뱃지로 표시:
+       예: "Git: 2" "MCP: 1" 뱃지를 model 뱃지 옆에 추가
+
+3-6. TaskNode 컴포넌트에서 hasReportOutline 반영
+     TaskNode.tsx에서 hasReportOutline이 true일 때 리포트 아이콘 표시가 이미 구현되어 있는지 확인.
+     구현되어 있다면 data.hasReportOutline이 실제 데이터에서 오도록 연결만 확인.
+     미구현이면 작은 아이콘(FileText 등)을 쿼리 텍스트 옆에 추가.
+
+3-7. 프론트엔드 검증 실행
+
+----- Phase 4 통합 검증 -----
+
+4-1. 백엔드 서버 실행 상태 확인 (cd flow-backend && npm run start:dev)
+4-2. 프론트엔드 dev 서버 실행 상태 확인 (cd flow-front && npm run dev)
+4-3. Playwright MCP로 다음 시나리오를 검증:
+     시나리오 A — 런타임 상세 페이지 issueKey 확인:
+       localhost:5173에서 ACTIVE 워크플로우를 실행
+       런타임 상세 페이지(/workflow-runs/:id)에서 이슈 키가 표시되는지 확인
+     시나리오 B — Work 노드의 Git/MCP 정보 확인:
+       런타임 상세 페이지에서 Work 노드를 클릭
+       Git/MCP 뱃지가 표시되는지 확인
+     시나리오 C — PAUSED 상태에서 Work 노드 편집 시 Git/MCP 선택:
+       실행 중인 워크플로우를 일시정지
+       미래 Work 노드를 클릭하여 편집 패널 열기
+       Git Ref 체크박스와 MCP Server 체크박스가 표시되는지 확인
+       리소스를 선택/해제 후 저장이 정상 동작하는지 확인
+     시나리오 D — Work 노드 추가 시 Git/MCP 선택:
+       PAUSED 상태에서 Work 노드 추가
+       Git/MCP 선택이 가능한지 확인
+       추가 후 해당 노드에 리소스가 반영되는지 확인
+     시나리오 E — Task 노드 reportOutline 표시:
+       reportOutline이 설정된 태스크가 있는 워크플로우를 실행
+       해당 태스크 노드에 리포트 아이콘이 표시되는지 확인
+4-4. 문제 발견 시 즉시 수정하고 재검증
+4-5. 최종 검증 실행:
+     cd flow-backend && npm run typecheck && npm run test && npm run lint
+     cd flow-front && npx tsc -b && npm run lint && npm run build
+
+모든 Phase가 완료되고 전체 시나리오 검증이 통과하면 RUNTIME GAP FIX COMPLETE 를 출력한다.

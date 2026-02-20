@@ -1,0 +1,17 @@
+.DS_Store
+
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Ralph loop
+.ralph/
+
+# Environment
+.env
+
+# Runtime directories
+flowflow-repos/
+workflow-spaces/

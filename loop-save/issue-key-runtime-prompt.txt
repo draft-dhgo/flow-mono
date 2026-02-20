@@ -1,0 +1,402 @@
+워크플로우 설정(Workflow)에서 issueKey를 제거하고, 워크플로우 실행(WorkflowRun) 시점에 issueKey를 입력받도록 변경한다.
+브랜치 전략 템플릿은 워크플로우 설정에 유지하되, issueKey는 런타임 파라미터로만 존재해야 한다.
+백엔드와 프론트엔드 모두 수정이 필요하다.
+flow-backend/CLAUDE.md, flow-front/CLAUDE.md의 모든 규칙을 준수한다.
+
+현재 상태:
+  - Workflow 엔티티가 issueKey를 readonly 필드로 보유 (생성 시 필수, 수정 불가)
+  - WorkflowRun이 Workflow.issueKey를 복사하여 보유
+  - 워크플로우 생성 폼에서 issueKey를 입력 (PROJ-123 형식)
+  - "실행" 버튼 클릭 시 다이얼로그 없이 즉시 워크플로우 실행
+  - StartWorkflowRunUseCase가 WorkflowConfig.issueKey를 사용하여 브랜치명 생성
+  - 동일 워크플로우를 여러 이슈에 재사용할 수 없음
+
+변경 목표:
+  - Workflow 엔티티에서 issueKey 필드 완전 제거
+  - branchStrategy(템플릿)는 워크플로우 설정에 유지: "feature/{issueKey}"
+  - "실행" 클릭 시 다이얼로그로 issueKey 입력 → StartWorkflowRunRequest에 포함
+  - StartWorkflowRunUseCase가 요청의 issueKey로 브랜치명 생성
+  - WorkflowRun은 여전히 issueKey를 보유 (런타임에 전달받은 값)
+
+아래 5개 Phase를 순서대로 진행한다.
+각 Phase 완료 후 반드시 아래 검증을 실행한다. 검증 실패 시 수정 후 다시 검증한다.
+  백엔드 검증: cd flow-backend && npm run typecheck && npm run test && npm run lint
+  프론트엔드 검증: cd flow-front && npx tsc -b && npm run lint && npm run build
+
+----- Phase 1 백엔드: Workflow 엔티티에서 issueKey 제거 -----
+
+핵심 원인: Workflow 엔티티가 issueKey를 소유하면 동일 워크플로우를 여러 이슈에 재사용 불가.
+issueKey는 "어떤 작업을 할 것인가"의 일부이므로 런타임(WorkflowRun)에 속해야 한다.
+
+핵심 파일:
+  - flow-backend/src/workflow/domain/entities/workflow.ts
+  - flow-backend/src/workflow/domain/value-objects/index.ts
+  - flow-backend/src/workflow/presentation/dto/create-workflow.dto.ts
+  - flow-backend/src/workflow/presentation/workflow.controller.ts
+  - flow-backend/src/workflow/application/use-cases/create-workflow-use-case.ts
+  - flow-backend/src/workflow/infra/workflow-config-reader-impl.ts
+  - flow-backend/src/workflow/infra/typeorm/workflow.schema.ts
+  - flow-backend/src/workflow/infra/typeorm/workflow-typeorm-repository.ts
+  - flow-backend/src/common/ports/workflow-config-reader.ts
+  - flow-backend/src/common/events/workflow-events.ts
+참조할 코드 (읽기만, 수정하지 않음):
+  - flow-backend/src/workflow/domain/value-objects/issue-key.ts (IssueKey VO -- 삭제하지 않음. 런타임에서 계속 사용)
+  - flow-backend/src/workflow-runtime/domain/entities/workflow-run.ts (WorkflowRun.issueKey 유지 확인)
+
+1-1. Workflow 엔티티에서 issueKey 제거
+     flow-backend/src/workflow/domain/entities/workflow.ts 수정:
+
+     a) WorkflowCreateProps에서 issueKey 행 삭제.
+     b) WorkflowFromProps에서 issueKey 행 삭제.
+     c) Workflow 클래스에서 private readonly _issueKey: IssueKey 필드 삭제.
+     d) constructor의 props 타입에서 issueKey 삭제, this._issueKey 대입 삭제.
+     e) get issueKey() getter 삭제.
+     f) static create()에서 issueKey: props.issueKey 삭제.
+     g) static fromProps()에서 issueKey: props.issueKey 삭제.
+     h) WorkflowCreated 이벤트 생성 시 issueKey 삭제:
+        현재 (line 94-99):
+          new WorkflowCreated({ workflowId: workflow._id, name: workflow._name, issueKey: workflow._issueKey })
+        변경:
+          new WorkflowCreated({ workflowId: workflow._id, name: workflow._name })
+     i) import에서 IssueKey 타입 import 삭제 (사용처 없으면).
+
+1-2. WorkflowCreated 이벤트에서 issueKey 제거
+     flow-backend/src/common/events/workflow-events.ts 수정:
+
+     WorkflowCreatedPayload 인터페이스에서 issueKey: string 행 삭제.
+
+1-3. WorkflowConfig 포트에서 issueKey 제거
+     flow-backend/src/common/ports/workflow-config-reader.ts 수정:
+
+     WorkflowConfig 인터페이스에서 readonly issueKey: string 행 삭제.
+
+1-4. WorkflowConfigReaderImpl에서 issueKey 매핑 제거
+     flow-backend/src/workflow/infra/workflow-config-reader-impl.ts 수정:
+
+     findById() 메서드의 config 객체에서 issueKey: workflow.issueKey as string 행 삭제.
+
+1-5. CreateWorkflowDto에서 issueKey 제거
+     flow-backend/src/workflow/presentation/dto/create-workflow.dto.ts 수정:
+
+     CreateWorkflowDto 클래스에서 issueKey 필드 및 데코레이터(@IsString, @IsNotEmpty) 삭제.
+
+1-6. WorkflowController에서 issueKey 제거
+     flow-backend/src/workflow/presentation/workflow.controller.ts 수정:
+
+     a) create() 메서드에서 issueKey: dto.issueKey 삭제.
+     b) serializeWorkflow()에서 issueKey: workflow.issueKey 행 삭제.
+
+1-7. CreateWorkflowUseCase에서 issueKey 제거
+     flow-backend/src/workflow/application/use-cases/create-workflow-use-case.ts 수정:
+
+     a) CreateWorkflowCommand 인터페이스에서 issueKey 삭제.
+     b) execute() 내부에서 IssueKey.create(command.issueKey) 호출 삭제.
+     c) Workflow.create() 호출에서 issueKey 삭제.
+
+1-8. TypeORM 스키마에서 issue_key 컬럼 제거
+     flow-backend/src/workflow/infra/typeorm/workflow.schema.ts 수정:
+
+     a) WorkflowRow 인터페이스에서 issue_key: string 삭제.
+     b) WorkflowSchema columns에서 issue_key 컬럼 정의 삭제.
+
+1-9. TypeORM Repository 매핑에서 issueKey 제거
+     flow-backend/src/workflow/infra/typeorm/workflow-typeorm-repository.ts 수정:
+
+     a) toDomain()에서 issueKey: row.issue_key as IssueKey 삭제.
+     b) toRow()에서 issue_key: entity.issueKey as string 삭제.
+
+1-10. 기존 테스트 수정
+      grep으로 tests/ 디렉토리에서 issueKey 패턴을 검색하여 Workflow 관련 테스트 수정.
+      주요 대상:
+        - tests/unit/domain/workflow/Workflow.test.ts: makeValidProps()에서 issueKey 삭제.
+        - tests/unit/application/workflow/create-workflow-use-case.test.ts: command에서 issueKey 삭제.
+        - tests/unit/application/workflow/UpdateWorkflowUseCase.test.ts: issueKey 참조 삭제.
+        - tests/unit/application/workflow/DeleteWorkflowUseCase.test.ts: issueKey 참조 삭제.
+        - tests/unit/application/workflow/event-handlers/*.test.ts: issueKey 참조 삭제.
+        - tests/integration/workflow-git-cascade.test.ts: issueKey 참조 삭제.
+      WorkflowRun 관련 테스트(start-workflow-run-use-case.test.ts 등)는 Phase 2에서 수정.
+
+1-11. 백엔드 검증 실행
+
+----- Phase 2 백엔드: StartWorkflowRun에 issueKey 파라미터 추가 -----
+
+핵심: StartWorkflowRunCommand와 DTO에 issueKey를 추가하여 런타임에 전달받는다.
+WorkflowConfig에서 issueKey가 사라졌으므로 command에서 직접 받아야 한다.
+
+핵심 파일:
+  - flow-backend/src/workflow-runtime/presentation/dto/start-workflow-run.dto.ts
+  - flow-backend/src/workflow-runtime/presentation/workflow-runtime.controller.ts
+  - flow-backend/src/workflow-runtime/application/use-cases/start-workflow-run-use-case.ts
+  - flow-backend/src/workflow-runtime/application/factories/workflow-run-factory.ts
+참조할 코드 (읽기만, 수정하지 않음):
+  - flow-backend/src/workflow/domain/value-objects/issue-key.ts (IssueKey VO 검증 로직)
+  - flow-backend/src/workflow-runtime/domain/entities/workflow-run.ts (WorkflowRunCreateProps.issueKey 유지)
+
+2-1. StartWorkflowRunDto에 issueKey 추가
+     flow-backend/src/workflow-runtime/presentation/dto/start-workflow-run.dto.ts 수정:
+
+     현재:
+       workflowId: string (필수)
+     추가:
+       issueKey: string (필수, @IsString, @IsNotEmpty)
+
+2-2. WorkflowRuntimeController.start()에서 issueKey 전달
+     flow-backend/src/workflow-runtime/presentation/workflow-runtime.controller.ts 수정:
+
+     현재 (line 41-44):
+       return this.startUseCase.execute({ workflowId: dto.workflowId as WorkflowId });
+     변경:
+       return this.startUseCase.execute({ workflowId: dto.workflowId as WorkflowId, issueKey: dto.issueKey });
+
+2-3. StartWorkflowRunCommand에 issueKey 추가
+     flow-backend/src/workflow-runtime/application/use-cases/start-workflow-run-use-case.ts 수정:
+
+     a) StartWorkflowRunCommand 인터페이스에 추가:
+          readonly issueKey: string;
+
+     b) execute() 메서드에서 IssueKey 검증 추가:
+        command.issueKey를 IssueKey.create()로 검증.
+        import에 IssueKey 추가 (from @workflow/domain/value-objects/index.js).
+
+     c) WorkflowRunFactory.build() 호출 변경:
+        현재: this.workflowRunFactory.build(workflow)
+        변경: this.workflowRunFactory.build(workflow, command.issueKey)
+
+     d) 브랜치명 생성에서 issueKey 소스 변경:
+        현재 (line 71-74):
+          const resolvedBranchName = workflow.branchStrategy.replace('{issueKey}', workflow.issueKey);
+        변경:
+          const resolvedBranchName = workflow.branchStrategy.replace('{issueKey}', command.issueKey);
+
+2-4. WorkflowRunFactory.build()에 issueKey 파라미터 추가
+     flow-backend/src/workflow-runtime/application/factories/workflow-run-factory.ts 수정:
+
+     현재: build(config: WorkflowConfig): WorkflowRunBuildResult
+     변경: build(config: WorkflowConfig, issueKey: string): WorkflowRunBuildResult
+
+     WorkflowRun.create() 호출에서:
+       현재: issueKey: config.issueKey
+       변경: issueKey: issueKey
+
+2-5. 기존 테스트 수정
+     grep으로 tests/ 디렉토리에서 WorkflowRun 관련 테스트 수정:
+       - tests/unit/application/workflow-runtime/start-workflow-run-use-case.test.ts:
+           a) createWorkflowConfig()에서 issueKey 행 삭제.
+           b) useCase.execute() 호출에 issueKey 추가:
+              현재: execute({ workflowId: WF_ID })
+              변경: execute({ workflowId: WF_ID, issueKey: 'TEST-001' })
+           c) 브랜치명 검증 테스트(feature/TEST-001) 유지 -- issueKey는 command에서 오므로 결과 동일.
+       - tests/unit/application/workflow-runtime/workflow-run-factory.test.ts:
+           build() 호출에 issueKey 파라미터 추가.
+       - tests/unit/application/workflow-runtime 하위 다른 테스트 파일:
+           WorkflowConfig 모킹에서 issueKey 삭제.
+           WorkflowRun.create() 또는 WorkflowRun.fromProps() 호출에서 issueKey는 유지 (런타임 필드이므로).
+       - tests/integration/app.integration.test.ts: issueKey 관련 수정.
+
+2-6. 백엔드 검증 실행
+
+----- Phase 3 프론트엔드: 워크플로우 설정에서 issueKey 제거 -----
+
+핵심: 워크플로우 생성/수정 폼에서 issueKey 입력 필드를 제거한다.
+워크플로우 목록에서 issueKey 컬럼을 제거한다.
+
+핵심 파일:
+  - flow-front/src/api/types.ts
+  - flow-front/src/pages/WorkflowFlowEditorPage.tsx
+  - flow-front/src/components/flow/panels/WorkflowInfoPanel.tsx
+  - flow-front/src/pages/WorkflowListPage.tsx
+참조할 코드 (읽기만, 수정하지 않음):
+  - flow-front/src/api/workflows.ts (API 호출 구조)
+
+3-1. API 타입에서 워크플로우 issueKey 제거
+     flow-front/src/api/types.ts 수정:
+
+     a) CreateWorkflowRequest에서 issueKey: string 행 삭제.
+     b) WorkflowResponse에서 issueKey: string 행 삭제.
+     c) WorkflowListItem에서 issueKey: string 행 삭제.
+     d) StartWorkflowRunRequest에 issueKey 추가:
+          현재: { workflowId: string }
+          변경: { workflowId: string; issueKey: string }
+     주의: WorkflowRunDetailResponse.issueKey와 WorkflowRunListItem.issueKey는 유지 (런타임 데이터).
+
+3-2. 워크플로우 폼 스키마에서 issueKey 제거
+     flow-front/src/pages/WorkflowFlowEditorPage.tsx 수정:
+
+     a) workflowFormSchema에서 issueKey 행 삭제:
+          현재: issueKey: z.string().regex(/^[A-Z][A-Z0-9]+-\d+$/, '이슈 키 형식: PROJ-123'),
+          삭제.
+     b) form defaultValues에서 issueKey: '' 삭제.
+     c) useEffect의 form.reset()에서 issueKey: workflow.issueKey 삭제.
+     d) onSubmit의 normalized 객체에는 issueKey가 없으므로 별도 수정 불필요.
+        createMutation.mutate(normalized)은 issueKey 없이 전달.
+
+3-3. WorkflowInfoPanel에서 issueKey 입력 필드 제거
+     flow-front/src/components/flow/panels/WorkflowInfoPanel.tsx 수정:
+
+     이슈 키 입력 블록 전체 삭제 (line 35-47):
+       <div>
+         <label className="text-sm font-medium">이슈 키 *</label>
+         <Input ... />
+         {form.formState.errors.issueKey && ...}
+       </div>
+
+3-4. WorkflowListPage에서 issueKey 컬럼 제거
+     flow-front/src/pages/WorkflowListPage.tsx 수정:
+
+     columns 배열에서 issueKey 컬럼 삭제:
+       현재 (line 61): { header: 'Issue Key', accessor: 'issueKey' },
+       삭제.
+
+3-5. 프론트엔드 검증 실행:
+     cd flow-front && npx tsc -b && npm run lint && npm run build
+
+----- Phase 4 프론트엔드: 실행 시 issueKey 입력 다이얼로그 추가 -----
+
+핵심: "실행" 버튼 클릭 시 issueKey를 입력받는 다이얼로그를 표시한다.
+사용자가 issueKey를 입력하고 확인하면 StartWorkflowRunRequest에 포함하여 API 호출.
+
+핵심 파일:
+  - flow-front/src/pages/WorkflowListPage.tsx
+  - flow-front/src/hooks/useWorkflows.ts
+  - flow-front/src/api/workflow-runs.ts
+참조할 코드 (읽기만, 수정하지 않음):
+  - flow-front/src/components/ConfirmDialog.tsx (기존 다이얼로그 컴포넌트 패턴)
+  - flow-front/src/components/ui/dialog.tsx (shadcn Dialog 컴포넌트)
+  - flow-front/src/components/ui/input.tsx (Input 컴포넌트)
+
+4-1. useWorkflows 훅의 startRunMutation 시그니처 변경
+     flow-front/src/hooks/useWorkflows.ts 수정:
+
+     현재 (line 51-56):
+       const startRunMutation = useMutation({
+         mutationFn: (workflowId: string) => workflowRunsApi.start({ workflowId }),
+         ...
+       });
+     변경:
+       const startRunMutation = useMutation({
+         mutationFn: (params: { workflowId: string; issueKey: string }) =>
+           workflowRunsApi.start(params),
+         ...
+       });
+
+4-2. WorkflowListPage에 실행 다이얼로그 추가
+     flow-front/src/pages/WorkflowListPage.tsx 수정:
+
+     a) 상태 추가:
+          const [runTarget, setRunTarget] = useState<WorkflowListItem | null>(null);
+          const [runIssueKey, setRunIssueKey] = useState('');
+          const [issueKeyError, setIssueKeyError] = useState('');
+
+     b) handleRun 변경:
+          현재: handleRun(id) → 즉시 startRunMutation.mutate(id)
+          변경: handleRun(row) → setRunTarget(row) (다이얼로그 열기)
+
+     c) 실행 확인 핸들러 추가:
+          const handleConfirmRun = () => {
+            issueKey 형식 검증: /^[A-Z][A-Z0-9]+-\d+$/ 패턴 체크.
+            실패 시 setIssueKeyError('이슈 키 형식: PROJ-123') 후 리턴.
+            startRunMutation.mutate(
+              { workflowId: runTarget.id, issueKey: runIssueKey },
+              { onSuccess: (data) => { navigate(...); setRunTarget(null); setRunIssueKey(''); } }
+            );
+          };
+
+     d) "실행" 드롭다운 항목 변경:
+          현재: onClick={() => handleRun(row.id)}
+          변경: onClick={() => handleRun(row)}
+          handleRun의 파라미터 타입을 WorkflowListItem으로 변경.
+
+     e) Dialog 컴포넌트 추가 (return문 하단, ConfirmDialog 아래):
+          shadcn Dialog를 사용하여 issueKey 입력 다이얼로그 구현.
+          Dialog 내용:
+            - 타이틀: "워크플로우 실행"
+            - 설명: 워크플로우 이름 표시 (runTarget?.name)
+            - Input: issueKey 입력, placeholder "PROJ-123"
+            - 에러 메시지 표시 (issueKeyError)
+            - 취소/실행 버튼
+          Dialog open 조건: !!runTarget
+          onOpenChange: (open) => !open && (setRunTarget(null), setRunIssueKey(''), setIssueKeyError(''))
+
+     f) 필요한 import 추가:
+          Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter
+          from '@/components/ui/dialog'
+          Input from '@/components/ui/input'
+
+4-3. branchStrategy 미리보기 표시 (선택)
+     실행 다이얼로그에서 issueKey 입력 시 브랜치명 미리보기를 표시한다.
+     현재 워크플로우의 branchStrategy를 WorkflowListItem에서 읽어올 수 있다 (branchStrategy 필드 존재).
+     입력된 issueKey로 {issueKey} 치환한 결과를 미리보기로 표시:
+       예: branchStrategy "feature/{issueKey}" + issueKey "PROJ-123" → "feature/PROJ-123"
+     Input 아래에 작은 텍스트로:
+       <p className="text-xs text-muted-foreground mt-1">브랜치: {미리보기}</p>
+
+4-4. 프론트엔드 검증 실행:
+     cd flow-front && npx tsc -b && npm run lint && npm run build
+
+----- Phase 5 통합 검증 -----
+
+5-1. 백엔드 서버 실행 상태 확인
+     localhost:3000 으로 접근하여 서버가 실행 중인지 확인한다.
+     실행 중이지 않으면: cd flow-backend && npm run build && npm run start 를 백그라운드로 실행한다.
+
+5-2. 프론트엔드 dev 서버 실행 상태 확인
+     localhost:5173 으로 접근하여 서버가 실행 중인지 확인한다.
+     실행 중이지 않으면: cd flow-front && npm run dev 를 백그라운드로 실행한다.
+
+5-3. 실제 오픈소스 Git 레포를 등록하여 테스트 데이터 준비
+     Playwright MCP를 통해 다음을 수행:
+
+     a) localhost:5173 접속 → Git 관리 페이지로 이동
+     b) 공개 오픈소스 레포를 등록한다.
+        예: https://github.com/anthropics/anthropic-cookbook.git
+        이 레포를 Git으로 등록하고 clone이 완료될 때까지 대기한다.
+     c) 등록된 Git의 ID를 기록한다.
+
+5-4. Playwright MCP로 다음 시나리오를 검증:
+
+     시나리오 A -- 워크플로우 생성 시 issueKey 없음 확인:
+       localhost:5173/workflows/new 로 이동하여 새 워크플로우 생성 화면 진입.
+       사이드 패널에서 "이슈 키" 입력 필드가 존재하지 않는지 확인.
+       "브랜치 전략" 입력 필드에 "feature/{issueKey}" 입력.
+       워크플로우 이름, Git 참조(5-3에서 등록한 레포, baseBranch: main), Work Definition 입력.
+       저장 후 워크플로우 목록으로 이동.
+       목록 테이블에 "Issue Key" 컬럼이 없는지 확인.
+
+     시나리오 B -- 워크플로우 활성화:
+       생성한 워크플로우의 드롭다운에서 "활성화" 클릭.
+       상태가 ACTIVE로 변경되는지 확인.
+
+     시나리오 C -- 실행 시 issueKey 입력 다이얼로그:
+       ACTIVE 워크플로우의 드롭다운에서 "실행" 클릭.
+       issueKey 입력 다이얼로그가 표시되는지 확인.
+       워크플로우 이름이 다이얼로그에 표시되는지 확인.
+       빈 값으로 실행 시도 → 에러 메시지 확인.
+       잘못된 형식(예: "abc") → 에러 메시지 확인.
+       올바른 형식 "TEST-001" 입력.
+       브랜치 미리보기 "feature/TEST-001"이 표시되는지 확인.
+       "실행" 버튼 클릭.
+
+     시나리오 D -- 런타임에서 issueKey 확인:
+       워크플로우 런 상세 페이지로 자동 이동 확인.
+       RunOverviewPanel에 "이슈 키: TEST-001"이 표시되는지 확인.
+       RUNNING 상태가 표시되는지 확인.
+
+     시나리오 E -- 동일 워크플로우 재실행 (다른 이슈키):
+       워크플로우 목록으로 돌아가서 같은 ACTIVE 워크플로우에 "실행" 클릭.
+       다이얼로그에 "PROJ-456" 입력 후 실행.
+       새로운 런이 생성되고 issueKey가 "PROJ-456"인지 확인.
+       이전 런의 issueKey "TEST-001"과 다른지 확인.
+       즉, 동일 워크플로우를 서로 다른 이슈키로 여러 번 실행 가능함을 검증.
+
+     시나리오 F -- Git worktree가 올바른 브랜치로 생성되었는지 확인:
+       시나리오 C에서 실행한 런의 ID를 기록한다.
+       서버 로그 또는 API를 통해 worktree가 "feature/TEST-001" 브랜치로 생성되었는지 확인.
+       백엔드 콘솔에서 createWorktree 호출 시 newBranchName이 "feature/TEST-001"인지 확인.
+
+5-5. 문제 발견 시 즉시 수정하고 재검증
+
+5-6. 최종 검증 실행:
+     cd flow-backend && npm run typecheck && npm run test && npm run lint
+     cd flow-front && npx tsc -b && npm run lint && npm run build
+
+모든 Phase가 완료되고 전체 시나리오 검증이 통과하면 ISSUE KEY RUNTIME MIGRATION COMPLETE 를 출력한다.

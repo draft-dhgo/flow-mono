@@ -1,0 +1,26 @@
+FlowFlow 프로젝트의 수동 UI 테스트를 Playwright MCP로 수행한다.
+백엔드 서버와 프론트엔드 dev 서버가 실행 중이어야 한다.
+flow-backend/CLAUDE.md, flow-front/CLAUDE.md의 모든 규칙을 준수한다.
+
+테스트 시나리오 파일 6개를 순서대로 검증한다:
+  1. manual-test-sc/git.md -- Git 저장소 관리
+  2. manual-test-sc/mcp-server.md -- MCP 서버 관리
+  3. manual-test-sc/workflow.md -- 워크플로우 정의
+  4. manual-test-sc/workflow-runtime.md -- 워크플로우 실행 런타임
+  5. manual-test-sc/agent-session.md -- 에이전트 세션 관리
+  6. manual-test-sc/integration.md -- 프론트엔드-백엔드 통합
+
+각 시나리오 파일의 모든 테스트 케이스를 Playwright MCP로 실행한다.
+테스트 중 캡처한 스크린샷은 manual-test-sc/screenshots/ 디렉토리에 저장한다.
+파일명 형식: 도메인-시나리오번호.png
+
+각 시나리오 완료 후 결과를 manual-test-sc/checklist.md에 반영한다.
+통과한 항목은 [x]로, 실패한 항목은 [ ]로 표시하고 실패 원인을 기록한다.
+
+실패한 테스트가 있으면 원인을 분석하고 코드를 수정한다.
+수정 후 아래 검증을 실행한다:
+  백엔드 검증: cd flow-backend && npm run typecheck && npm run test && npm run lint
+  프론트엔드 검증: cd flow-front && npx tsc -b && npm run lint && npm run build
+검증 실패 시 수정 후 다시 검증한다.
+
+모든 시나리오가 통과하고 checklist.md의 모든 항목이 [x]로 체크되면 MANUAL TEST COMPLETE 를 출력한다.

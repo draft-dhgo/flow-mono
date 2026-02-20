@@ -1,0 +1,536 @@
+파이프라인 이벤트 핸들러 체인을 서비스 내부 루프로 리팩토링하고,
+에러 처리를 개선하고, 체크포인트 복원을 resume과 분리하고, 런타임 전용 목록 페이지를 추가한다.
+flow-front/CLAUDE.md와 flow-backend/CLAUDE.md의 모든 규칙을 준수한다.
+도메인 엔티티/VO/이벤트 정의는 수정하지 않는다. ports, application, infra, presentation 레이어만 수정.
+
+수정할 항목 목록:
+  A1. fire-and-forget 이벤트 핸들러 5개를 WorkflowPipelineService 서비스 내부 루프로 대체
+  A2. WorkflowPipelineService 추상 포트 + 구현체 + 단위 테스트 생성
+  A3. workflow-runtime.module.ts에서 5개 핸들러 제거, PipelineService 등록
+  B1. cancel/pause UseCase의 silent catch를 독립 실행 + Logger 경고로 변경
+  C1. startNextWorkExecution의 agentService.startSession 반환값 검증
+  D1. 체크포인트 복원을 resume과 분리하는 RestoreToCheckpointUseCase + 엔드포인트 추가
+  D2. ResumeWorkflowRunUseCase에서 restoredToCheckpoint일 때 auto-revert 스킵
+  D3. 프론트엔드 체크포인트 복원 UI 분리 -- 복원과 재개를 별도 동작으로
+  E1. 워크플로우 런타임 전용 목록 페이지 /workflow-runs 추가 -- 상태 필터 포함
+  F1. flow-backend/CLAUDE.md 규칙 5-3을 서비스 포트 기반으로 교체
+
+아래 6개 Phase를 순서대로 진행한다.
+각 Phase 완료 후 반드시 아래 검증을 실행한다. 검증 실패 시 수정 후 다시 검증한다. 검증 통과 후 다음 Phase로 진행한다.
+  백엔드 검증: cd flow-backend && npm run typecheck && npm run test && npm run lint
+  프론트엔드 검증: cd flow-front && npx tsc -b && npm run lint && npm run build
+각 Phase 완료 후 Playwright MCP를 통해 localhost:5173에 접속하여 실제 화면을 확인하고 문제가 있으면 즉시 수정한다.
+
+----- Phase 1 백엔드 -- PipelineService 포트 + 구현체 + 테스트 -- A1, A2 -----
+
+핵심 파일:
+  - flow-backend/src/common/ports/workflow-pipeline-service.ts -- 신규
+  - flow-backend/src/common/ports/index.ts -- 수정
+  - flow-backend/src/workflow-runtime/infra/workflow-pipeline-service-impl.ts -- 신규
+  - flow-backend/tests/unit/infra/workflow-runtime/workflow-pipeline-service-impl.test.ts -- 신규
+참조할 코드 -- 읽기만, 수정하지 않음:
+  - flow-backend/src/common/ports/agent-service.ts -- 추상 포트 패턴 참조
+  - flow-backend/src/workflow-runtime/application/event-handlers/work-execution-started-handler.ts -- retry/recovery 패턴 참조
+  - flow-backend/src/workflow-runtime/application/commands/send-query-use-case.ts
+  - flow-backend/src/workflow-runtime/application/commands/complete-task-execution-use-case.ts
+  - flow-backend/src/workflow-runtime/application/commands/start-next-work-execution-use-case.ts
+  - flow-backend/src/workflow-runtime/domain/entities/workflow-run.ts -- status, currentWorkIndex
+  - flow-backend/src/workflow-runtime/domain/entities/work-execution.ts -- isTerminal, currentTask
+
+1-1. 추상 포트 생성: flow-backend/src/common/ports/workflow-pipeline-service.ts
+     AgentService와 동일 패턴으로 추상 클래스 정의.
+     import type WorkflowRunId from '../ids/index.js' 사용.
+     추상 메서드: abstract runPipeline -- workflowRunId: WorkflowRunId -- returns Promise<void>
+
+1-2. flow-backend/src/common/ports/index.ts 에 export 추가:
+     export WorkflowPipelineService from './workflow-pipeline-service.js';
+
+1-3. 구현체 생성: flow-backend/src/workflow-runtime/infra/workflow-pipeline-service-impl.ts
+
+     @Injectable 데코레이터 사용. WorkflowPipelineService를 extends.
+     의존성 -- 생성자 주입:
+       - StartNextWorkExecutionUseCase
+       - SendQueryUseCase
+       - CompleteTaskExecutionUseCase
+       - WorkflowRunRepository
+       - WorkExecutionRepository
+       - EventPublisher
+       - Logger -- private readonly logger = new Logger with WorkflowPipelineServiceImpl.name
+
+     상수:
+       - MAX_RETRIES = 2
+       - RETRY_DELAY_MS = 3000
+
+     private 유틸:
+       - isRetryable -- err: unknown -- returns boolean
+         ApplicationError이고 code에 NOT_FOUND 포함 시 false, 그 외 true
+       - delay -- ms: number -- returns Promise<void>
+         return new Promise with resolve => setTimeout with resolve, ms
+
+     async runPipeline -- workflowRunId: WorkflowRunId -- returns Promise<void>:
+       this.logger.log Pipeline started: runId= + workflowRunId
+       try 블록 안에서:
+         while true 루프:
+           const run = await this.workflowRunRepository.findById with workflowRunId
+           if not run or run.status !== WorkflowRunStatus.RUNNING then break
+
+           const startResult = await this.startNextWorkExecutionUseCase.execute with workflowRunId
+           if startResult.isComplete or not startResult.workExecutionId then break
+
+           await this.runWorkExecution with startResult.workExecutionId as WorkExecutionId
+
+           // 루프 끝에서 run 재로드하여 status 확인 -- pauseAfter 등으로 AWAITING 가능
+           const updatedRun = await this.workflowRunRepository.findById with workflowRunId
+           if not updatedRun or updatedRun.status !== WorkflowRunStatus.RUNNING then break
+       catch err: unknown:
+         this.logger.error Pipeline error: runId= + workflowRunId, err
+       finally:
+         this.logger.log Pipeline ended: runId= + workflowRunId
+
+     private async runWorkExecution -- weId: WorkExecutionId -- returns Promise<void>:
+       while true 루프:
+         try:
+           await this.sendQueryWithRetry with weId
+         catch err: unknown:
+           this.logger.error Query failed after retries: weId= + weId, err
+           await this.handleQueryFailure with weId
+           return
+         const result = await this.completeTaskExecutionUseCase.execute with workExecutionId: weId
+         if not result.hasNextTask or result.isWorkComplete then return
+
+     private async sendQueryWithRetry -- weId: WorkExecutionId -- returns Promise<void>:
+       기존 WorkExecutionStartedHandler.executeWithRetry 패턴 재사용.
+       let lastError: unknown
+       for attempt from 0 to MAX_RETRIES:
+         try:
+           await this.sendQueryUseCase.execute with workExecutionId: weId
+           return
+         catch err: unknown:
+           lastError = err
+           if not this.isRetryable with err, or attempt === MAX_RETRIES then break
+           await this.delay with RETRY_DELAY_MS
+       throw lastError
+
+     private async handleQueryFailure -- weId: WorkExecutionId -- returns Promise<void>:
+       기존 WorkExecutionStartedHandler.handleQueryFailure 로직 재사용.
+       try 블록 안에서:
+         const workExecution = await this.workExecutionRepository.findById with weId
+         if not workExecution or workExecution.isTerminal then return
+         workExecution.advanceToNextTask
+         await this.workExecutionRepository.save with workExecution
+         const run = await this.workflowRunRepository.findById with workExecution.workflowRunId
+         if not run then return
+         if run.canPause then run.pause
+         await this.workflowRunRepository.save with run
+         const allEvents = spread workExecution.clearDomainEvents + spread run.clearDomainEvents
+         await this.eventPublisher.publishAll with allEvents
+       catch failureErr: unknown:
+         this.logger.error Failed to handle query failure:, failureErr
+
+1-4. 단위 테스트: flow-backend/tests/unit/infra/workflow-runtime/workflow-pipeline-service-impl.test.ts
+     vi.mock으로 UseCase들과 Repository를 모킹.
+     테스트 시나리오:
+       a -- 정상 파이프라인: 2개 work, 각 2개 task.
+          - startNextWorkExecution 2회 호출: 1회차 workExecutionId 반환, 2회차 isComplete
+          - sendQuery 4회, completeTask 4회
+          - 마지막 completeTask에서 isWorkComplete: true
+       b -- 쿼리 실패 + 재시도 성공:
+          - sendQuery 1회 실패 후 2회차 성공
+       c -- 쿼리 실패 + 재시도 소진 후 recovery:
+          - sendQuery 3회 모두 실패
+          - handleQueryFailure 호출 확인: workExecution.advanceToNextTask + run.pause
+       d -- run이 RUNNING 아닌 상태:
+          - workflowRunRepository.findById가 PAUSED 상태 run 반환
+          - 즉시 종료, startNextWorkExecution 호출 안 됨
+       e -- startNextWorkExecution이 isComplete 반환:
+          - 즉시 종료
+
+1-5. 백엔드 검증 실행
+
+----- Phase 2 백엔드 -- 모듈 배선 + 핸들러 삭제 + 에러 처리 -- A3, B1, C1 -----
+
+핵심 파일:
+  - flow-backend/src/workflow-runtime/presentation/workflow-runtime.module.ts
+  - flow-backend/src/workflow-runtime/application/commands/cancel-workflow-run-use-case.ts
+  - flow-backend/src/workflow-runtime/application/commands/pause-workflow-run-use-case.ts
+  - flow-backend/src/workflow-runtime/application/commands/start-next-work-execution-use-case.ts
+  - flow-backend/src/workflow-runtime/application/event-handlers/index.ts
+삭제 파일:
+  - flow-backend/src/workflow-runtime/application/event-handlers/workflow-run-started-handler.ts
+  - flow-backend/src/workflow-runtime/application/event-handlers/work-execution-started-handler.ts
+  - flow-backend/src/workflow-runtime/application/event-handlers/query-responded-handler.ts
+  - flow-backend/src/workflow-runtime/application/event-handlers/report-generated-handler.ts
+  - flow-backend/src/workflow-runtime/application/event-handlers/work-execution-completed-handler.ts
+
+2-1. 5개 이벤트 핸들러 파일 삭제
+     위 삭제 파일 목록의 5개 파일을 삭제한다.
+
+2-2. event-handlers/index.ts 수정:
+     5개 핸들러 export 제거. WorkflowDeletedHandler export만 남긴다.
+
+2-3. workflow-runtime.module.ts 수정:
+
+     import 제거:
+       - WorkExecutionStartedHandler, WorkExecutionCompletedHandler,
+         WorkflowRunStartedHandler, QueryRespondedHandler, ReportCompletedHandler
+       - WorkExecutionStarted, WorkExecutionCompleted, QueryResponded, ReportCompleted 이벤트
+
+     import 추가:
+       - WorkflowPipelineService from @common/ports/index.js
+       - WorkflowPipelineServiceImpl from ../infra/workflow-pipeline-service-impl.js
+       - WorkflowRunId from @common/ids/index.js 또는 기존 import 경로
+
+     providers 배열 수정:
+       - 제거: WorkExecutionStartedHandler, WorkExecutionCompletedHandler,
+               WorkflowRunStartedHandler, QueryRespondedHandler, ReportCompletedHandler
+       - 추가: provide: WorkflowPipelineService, useClass: WorkflowPipelineServiceImpl
+
+     constructor 수정:
+       - 제거: weStartedHandler, weCompletedHandler, wrStartedHandler,
+               queryRespondedHandler, reportCompletedHandler 파라미터
+       - 추가: private readonly pipelineService: WorkflowPipelineService
+
+     onModuleInit 수정 -- subscription 3개만 남김:
+       // 파이프라인 시작 -- presentation 계층에서만 void
+       WorkflowRunStarted.EVENT_TYPE 구독:
+         void this.pipelineService.runPipeline with
+           event as WorkflowRunStarted의 payload.workflowRunId as WorkflowRunId
+       WorkflowRunResumed.EVENT_TYPE 구독:
+         void this.pipelineService.runPipeline with
+           event as WorkflowRunResumed의 payload.workflowRunId as WorkflowRunId
+       // cross-domain 핸들러 유지
+       WorkflowDeleted.EVENT_TYPE 구독:
+         this.workflowDeletedHandler.handle with event as WorkflowDeleted
+       // Orphan recovery
+       void this.recoverOrphanedRunsUseCase.execute
+
+       기존 WorkExecutionStarted, WorkExecutionCompleted, QueryResponded,
+       ReportCompleted 이벤트 subscription은 모두 제거.
+
+2-4. cancel-workflow-run-use-case.ts 수정 -- B1:
+     import에 Logger 추가 from @nestjs/common.
+     클래스에 필드 추가: private readonly logger = new Logger with CancelWorkflowRunUseCase.name
+     기존 for 루프 내의 try-catch 블록 -- 하나의 try에 stop+delete를 묶은 것 -- 을 삭제하고,
+     stop과 delete를 독립적 try-catch로 분리:
+       try: await this.agentService.stopSession with we.id
+       catch err: unknown: this.logger.warn Failed to stop agent session: weId= + we.id, err
+       try: await this.agentService.deleteSession with we.id
+       catch err: unknown: this.logger.warn Failed to delete agent session: weId= + we.id, err
+
+2-5. pause-workflow-run-use-case.ts 수정 -- B1:
+     import에 Logger 추가 from @nestjs/common.
+     클래스에 필드 추가: private readonly logger = new Logger with PauseWorkflowRunUseCase.name
+     기존 try-catch 블록을 동일 패턴으로 분리:
+     if currentWeId 블록 내에서:
+       try: await this.agentService.stopSession with currentWeId
+       catch err: unknown: this.logger.warn Failed to stop agent session: weId= + currentWeId, err
+       try: await this.agentService.deleteSession with currentWeId
+       catch err: unknown: this.logger.warn Failed to delete agent session: weId= + currentWeId, err
+
+2-6. start-next-work-execution-use-case.ts 수정 -- C1:
+     agentService.startSession 호출 부분 -- 기존은 반환값 무시:
+     변경: 반환값을 sessionInfo 변수에 받고, sessionInfo.processId가 falsy이면
+     ApplicationError with AGENT_SESSION_NOT_ASSIGNED 를 throw.
+     구체적으로:
+       const sessionInfo = await this.agentService.startSession with
+         workExecutionId: workExecution.id,
+         workflowRunId: run.id,
+         model: currentConfig.model,
+         workspacePath: workSpacePath,
+         mcpServerConfigs
+       if not sessionInfo.processId:
+         throw new ApplicationError with
+           AGENT_SESSION_NOT_ASSIGNED,
+           Agent session for WorkExecution + workExecution.id + was not assigned
+     ApplicationError import가 이미 있는지 확인, 없으면 추가.
+
+2-7. 기존 핸들러 관련 테스트 파일이 있으면 삭제 또는 수정:
+     tests/ 디렉토리에서 삭제한 핸들러를 참조하는 테스트를 검색하여 제거.
+
+2-8. 백엔드 검증 실행
+
+----- Phase 3 백엔드 -- 체크포인트 복원 분리 + CLAUDE.md -- D1, D2, F1 -----
+
+핵심 파일:
+  - flow-backend/src/workflow-runtime/application/commands/restore-to-checkpoint-use-case.ts -- 신규
+  - flow-backend/src/workflow-runtime/application/commands/resume-workflow-run-use-case.ts -- 수정
+  - flow-backend/src/workflow-runtime/presentation/workflow-runtime.controller.ts -- 수정
+  - flow-backend/src/workflow-runtime/presentation/dto/restore-to-checkpoint.dto.ts -- 신규
+  - flow-backend/src/workflow-runtime/presentation/workflow-runtime.module.ts -- 수정
+  - flow-backend/CLAUDE.md -- 수정
+참조할 코드 -- 읽기만, 수정하지 않음:
+  - flow-backend/src/workflow-runtime/application/commands/resume-workflow-run-use-case.ts -- 복원 로직 참조
+  - flow-backend/src/workflow-runtime/domain/entities/workflow-run.ts -- restoreToCheckpoint, restoredToCheckpoint
+
+3-1. RestoreToCheckpointUseCase 생성:
+     flow-backend/src/workflow-runtime/application/commands/restore-to-checkpoint-use-case.ts
+
+     ResumeWorkflowRunUseCase의 restoreToCheckpoint + cleanup 로직을 추출.
+
+     Command 인터페이스 RestoreToCheckpointCommand:
+       readonly workflowRunId: WorkflowRunId
+       readonly checkpointId: CheckpointId
+
+     에러 클래스 -- ApplicationError 확장:
+       - WorkflowRunNotFoundError -- 기존 패턴
+       - WorkflowRunCannotRestoreError -- status가 RUNNING이면 먼저 pause 필요
+       - CheckpointNotFoundError
+       - CheckpointMismatchError -- checkpoint.workflowRunId !== run.id
+
+     의존성 -- 생성자 주입:
+       - WorkflowRunRepository
+       - CheckpointRepository
+       - WorkExecutionRepository
+       - ReportRepository
+       - WorkTreeRepository
+       - WorkflowSpaceRepository
+       - GitService
+       - FileSystem
+       - EventPublisher
+
+     execute 로직:
+       1. run = await workflowRunRepository.findById with workflowRunId
+          없으면 WorkflowRunNotFoundError
+       2. run.status가 RUNNING이면 WorkflowRunCannotRestoreError
+       3. checkpoint = await checkpointRepository.findById with checkpointId
+          없으면 CheckpointNotFoundError
+       4. checkpoint.workflowRunId !== run.id이면 CheckpointMismatchError
+       5. git worktree reset:
+          const workTrees = await workTreeRepository.findByWorkflowRunId with run.id
+          for each wt of workTrees:
+            const commitHash = checkpoint.getCommitHash with wt.gitId
+            if commitHash then await gitService.reset with wt.path, commitHash
+       6. trim execution history:
+          const trimmedExecutionIds = run.workExecutionIds.slice from checkpoint.workSequence
+          run.restoreToCheckpoint with checkpoint.workSequence
+       7. cleanup -- ResumeWorkflowRunUseCase의 cleanupWorkSpaces + cleanupExecutions 패턴 복사:
+          workflowSpace cleanup:
+            const workflowSpace = await workflowSpaceRepository.findByWorkflowRunId with run.id
+            if workflowSpace:
+              const removedWorkSpaces = workflowSpace.removeWorkSpacesByExecutionIds with trimmedExecutionIds
+              for each ws of removedWorkSpaces:
+                try: await fileSystem.deleteDirectory with ws.path -- catch: ignore
+              await workflowSpaceRepository.save with workflowSpace
+          execution cleanup:
+            const reports = await reportRepository.findByWorkflowRunId with run.id
+            const trimmedSet = new Set with trimmedExecutionIds
+            for each report of reports:
+              if trimmedSet.has with report.workExecutionId:
+                if report.filePath:
+                  try: await fileSystem.deleteFile with report.filePath -- catch: ignore
+                await reportRepository.delete with report.id
+            for each weId of trimmedExecutionIds:
+              await workExecutionRepository.delete with weId
+       8. save + publish:
+          await workflowRunRepository.save with run
+          await eventPublisher.publishAll with run.clearDomainEvents
+
+     결과: run은 PAUSED 상태, currentWorkIndex = checkpoint.workSequence,
+           restoredToCheckpoint = true. 사용자는 노드를 수정한 후 resume 가능.
+
+3-2. ResumeWorkflowRunUseCase 수정 -- D2:
+     auto-revert 조건에 restoredToCheckpoint 체크 추가.
+     기존 코드에서:
+       else if run.currentWorkIndex > 0
+     을 아래로 변경:
+       else if run.currentWorkIndex > 0 && not run.restoredToCheckpoint
+     이렇게 하면 RestoreToCheckpoint 후 Resume 시 중복 auto-revert가 방지된다.
+
+3-3. Controller에 엔드포인트 추가:
+     workflow-runtime.controller.ts에 새 메서드 추가:
+       @Post ':id/restore'
+       @HttpCode 200
+       async restoreToCheckpoint:
+         @Param id with BrandedIdPipe of WorkflowRunId
+         @Body dto: RestoreToCheckpointDto
+         await this.restoreToCheckpointUseCase.execute with
+           workflowRunId: id,
+           checkpointId: CheckpointId.create with dto.checkpointId
+
+     DTO 생성: flow-backend/src/workflow-runtime/presentation/dto/restore-to-checkpoint.dto.ts
+     클래스 RestoreToCheckpointDto:
+       @IsString @IsNotEmpty checkpointId: string
+       -- IsString, IsNotEmpty from class-validator
+
+     Controller constructor에 RestoreToCheckpointUseCase 주입 추가.
+     필요한 import 추가: RestoreToCheckpointUseCase, RestoreToCheckpointDto, CheckpointId.
+
+3-4. Module에 RestoreToCheckpointUseCase 등록:
+     workflow-runtime.module.ts의 providers에 RestoreToCheckpointUseCase 추가.
+     import 추가.
+
+3-5. flow-backend/CLAUDE.md 규칙 5-3 수정:
+     188번 줄부터 231번 줄까지의 기존 섹션 5-3 전체를 아래로 교체:
+
+     #### 5-3. 도메인 간 커맨드 호출 및 fire-and-forget 규칙
+
+     도메인 간 커맨드 호출: @common/ports/에 Service 포트를 정의하고 await로 호출한다.
+
+     예시 -- @common/ports/ 에 추상 클래스로 포트 정의:
+       export abstract class AgentService
+         abstract startSession with options: StartOptions returns Promise of AgentSessionInfo
+         abstract sendQuery with weId: WorkExecutionId, query: string returns Promise of QueryResult
+     예시 -- UseCase에서 외부 서비스처럼 await:
+       const result = await this.agentService.sendQuery with weId, query
+
+     fire-and-forget -- void -- 규칙:
+     - void는 presentation 계층에서만 허용 -- 컨트롤러, Module.onModuleInit
+     - application 계층에서는 반드시 await로 처리 -- UseCase, Service 구현체
+     - 장시간 실행되는 파이프라인은 Service 포트로 정의하고, presentation 계층에서 void service.run 으로 시작
+
+     이벤트 역할:
+     - 도메인 이벤트는 상태 변경 알림에 사용 -- cross-domain 반응, 로깅, 프론트엔드 SSE 등
+     - 파이프라인 진행에는 사용하지 않는다 -- Service 내부 루프로 처리
+
+3-6. 백엔드 검증 실행
+
+----- Phase 4 프론트엔드 -- 런타임 전용 목록 페이지 -- E1 -----
+
+핵심 파일:
+  - flow-front/src/pages/WorkflowRunListPage.tsx -- 신규
+  - flow-front/src/App.tsx -- 수정
+  - flow-front/src/components/layout/Sidebar.tsx -- 수정
+참조할 코드 -- 읽기만, 수정하지 않음:
+  - flow-front/src/pages/DashboardPage.tsx -- 테이블 패턴 참조
+  - flow-front/src/hooks/useWorkflowRuns.ts -- useWorkflowRunList 훅
+  - flow-front/src/api/types.ts -- WorkflowRunListItem, WorkflowRunStatus
+  - flow-front/src/components/DataTable.tsx
+  - flow-front/src/components/StatusBadge.tsx
+  - flow-front/src/lib/constants.ts -- RUN_STATUS_LABEL
+
+4-1. WorkflowRunListPage.tsx 생성:
+     DashboardPage의 테이블 부분을 참조하여 전용 런타임 목록 페이지.
+     useWorkflowRunList 훅 재사용.
+
+     상태 필터:
+       - useState로 WorkflowRunStatus 또는 ALL 로 필터 상태 관리
+       - 필터 버튼들: 전체, 실행 중, 일시정지, 대기 중, 완료, 취소
+       - 버튼 스타일: 선택된 필터에 variant=default, 나머지 variant=outline
+       - listQuery.data를 선택된 상태로 필터링. ALL이면 전체
+
+     DataTable 컬럼:
+       - Workflow -- workflowName
+       - Issue Key -- issueKey -- 새 컬럼
+       - Status -- StatusBadge 컴포넌트
+       - Progress -- Work X/Y 텍스트
+       - Actions -- Pause/Resume/Cancel/Delete -- DashboardPage와 동일 패턴
+
+     행 클릭 시 navigate to /workflow-runs/ + row.id 으로 상세 이동.
+     Cancel/Delete 확인 다이얼로그 포함 -- DashboardPage 패턴 재사용.
+     PageHeader title: 워크플로우 실행 목록
+
+4-2. App.tsx에 라우트 추가:
+     import WorkflowRunListPage 추가.
+     Route 추가 -- 기존 /workflow-runs/:id 라우트 위에:
+       path=/workflow-runs element=WorkflowRunListPage
+       path=/workflow-runs/:id element=WorkflowRunFlowPage
+
+4-3. Sidebar.tsx에 네비게이션 항목 추가:
+     lucide-react에서 적절한 아이콘 import -- ListChecks 또는 Activity 등.
+     navItems에 Dashboard 다음 위치에 추가:
+       to: /workflow-runs, label: Runs, icon: ListChecks
+
+4-4. 프론트엔드 검증 실행
+
+----- Phase 5 프론트엔드 -- 체크포인트 복원 UI 분리 -- D3 -----
+
+핵심 파일:
+  - flow-front/src/api/workflow-runs.ts -- 수정
+  - flow-front/src/hooks/useWorkflowRuns.ts -- 수정
+  - flow-front/src/components/flow/panels/CheckpointPanel.tsx -- 수정
+  - flow-front/src/components/flow/panels/RunOverviewPanel.tsx -- 수정
+  - flow-front/src/pages/WorkflowRunFlowPage.tsx -- 수정
+참조할 코드 -- 읽기만, 수정하지 않음:
+  - flow-front/src/api/types.ts
+
+5-1. API 모듈에 restore 추가:
+     flow-front/src/api/workflow-runs.ts 에 restore 메서드 추가:
+       restore: id와 checkpointId를 받아서
+         apiClient.post to /workflow-runs/ + id + /restore with body checkpointId
+
+5-2. useWorkflowRunDetail 훅에 restoreMutation 추가:
+     flow-front/src/hooks/useWorkflowRuns.ts 에:
+       const restoreMutation = useMutation:
+         mutationFn: checkpointId를 받아서 workflowRunsApi.restore with id, checkpointId
+         onSuccess: queryClient.invalidateQueries for detail and checkpoints
+     return 객체에 restoreMutation 추가.
+
+5-3. CheckpointPanel 수정:
+     props 변경:
+       onRestore의 의미를 복원만으로 변경. resume 없이.
+       isRestorePending prop 유지.
+
+     버튼 레이블 변경:
+       기존 복원 또는 Restore 을 이 지점으로 복원 으로 변경.
+       확인 다이얼로그 설명에 추가:
+         체크포인트로 복원합니다. 복원 후 노드 구성을 수정한 뒤 재개할 수 있습니다.
+
+     복원 성공 후 안내:
+       복원 성공 시 토스트 또는 인라인 메시지로
+       복원 완료. 노드 구성을 편집한 후 재개하세요. 표시.
+       toast 라이브러리가 있으면 사용, 없으면 간단한 인라인 메시지
+
+5-4. RunOverviewPanel 수정:
+     체크포인트 빠른 복원 섹션이 있다면:
+       복원 동작을 restore API로 변경. resume이 아닌 restore.
+       기존 resumeMutation with checkpointId 호출을 restoreMutation with checkpointId 으로 변경.
+
+5-5. WorkflowRunFlowPage 수정:
+     useWorkflowRunDetail에서 restoreMutation을 구조분해.
+     CheckpointPanel의 onRestore를:
+       기존: cpId => resumeMutation.mutate with cpId
+       변경: cpId => restoreMutation.mutate with cpId
+     isRestorePending도 restoreMutation.isPending으로 변경.
+
+     RunOverviewPanel의 체크포인트 복원 부분도 동일하게 변경.
+
+     resumeMutation은 checkpointId 없이 순수 재개만 담당:
+       재개 버튼: resumeMutation.mutate without arguments
+
+5-6. 프론트엔드 검증 실행
+
+----- Phase 6 통합 검증 -----
+
+6-1. 백엔드 서버 빌드 후 실행:
+     cd flow-backend && npm run build && npm run start
+     npm run start:dev는 사용하지 않는다 -- tsx가 emitDecoratorMetadata를 지원하지 않음
+
+6-2. 프론트엔드 dev 서버 실행:
+     cd flow-front && npm run dev
+
+6-3. Playwright MCP로 다음 시나리오를 검증:
+
+     시나리오 A -- 파이프라인 정상 실행:
+       localhost:5173에서 ACTIVE 워크플로우를 실행
+       런타임 상세 페이지 /workflow-runs/:id 에서 Work 노드들이 순서대로 실행되는지 확인
+       모든 Work 완료 후 COMPLETED 상태인지 확인
+
+     시나리오 B -- 런타임 목록 페이지:
+       사이드바에서 Runs 메뉴 클릭
+       /workflow-runs 경로에서 실행 목록이 테이블로 표시되는지 확인
+       Issue Key 컬럼이 표시되는지 확인
+       상태 필터 버튼들이 동작하는지 확인: 실행 중 클릭 시 RUNNING만 표시
+       행 클릭 시 /workflow-runs/:id 상세 페이지로 이동하는지 확인
+
+     시나리오 C -- 체크포인트 복원 후 노드 편집 후 재개:
+       워크플로우 실행 후 일시정지
+       체크포인트 패널에서 이 지점으로 복원 클릭
+       확인 다이얼로그에서 확인
+       상태가 PAUSED로 유지되는지 확인: 즉시 재개되지 않음
+       currentWorkIndex가 체크포인트 위치로 돌아갔는지 확인
+       복원된 위치 이후의 Work 노드를 클릭하여 설정 편집
+       편집 저장 후 재개 버튼으로 실행 시작
+       정상적으로 RUNNING 상태로 전환되는지 확인
+
+     시나리오 D -- 에러 처리 확인:
+       실행 중 워크플로우를 취소
+       콘솔에 agent session stop/delete 관련 warn 로그가 출력되는지 확인
+       silent catch가 아닌 Logger.warn으로 변경됨
+
+6-4. 문제 발견 시 즉시 수정하고 재검증
+
+6-5. 최종 검증 실행:
+     cd flow-backend && npm run typecheck && npm run test && npm run lint
+     cd flow-front && npx tsc -b && npm run lint && npm run build
+
+모든 Phase가 완료되고 전체 시나리오 검증이 통과하면 PIPELINE SERVICE + CHECKPOINT RESTORE + RUNTIME LIST COMPLETE 를 출력한다.

@@ -1,0 +1,781 @@
+워크플로우 실행 시 시드 변수를 지원하고, 런타임 종료 후 워크스페이스 디렉토리를 모나코 에디터로 읽기 전용 탐색하는 기능을 추가한다.
+flow-front/CLAUDE.md와 flow-backend/CLAUDE.md의 모든 규칙을 준수한다.
+
+시드 기능 상세:
+  시드는 워크플로우 정의에 key 목록만 저장하고, 런타임 시작 시 key-value 쌍을 전달받는다.
+  태스크 쿼리 텍스트에서 템플릿 마커를 실제 값으로 치환한다.
+  템플릿 마커 형식은 branchStrategy의 issueKey 치환과 동일한 중괄호 래핑 사용.
+  seed:키이름 형식 -- 예: 시드 키가 sourceFile이면 마커는 중괄호로 감싼 seed:sourceFile.
+  issueKey도 쿼리 텍스트 내에서 동일 형식으로 템플릿 사용 가능.
+
+모나코 에디터 상세:
+  완료 또는 취소된 워크플로우 런타임의 워크스페이스 디렉토리를 읽기 전용으로 탐색.
+  좌측에 파일 트리, 우측에 모나코 에디터로 파일 내용 표시.
+  @monaco-editor/react 패키지 사용.
+  워크스페이스 뷰어 선택 시 플로우 캔버스를 대체하여 전체 너비로 표시.
+
+수정할 항목 목록:
+  A1. Workflow 엔티티에 seedKeys 필드 추가
+  A2. WorkflowRun 엔티티에 seedValues 필드 추가
+  A3. WorkflowConfig 인터페이스에 seedKeys 추가
+  A4. WorkflowRunFactory에서 시드 템플릿 치환 로직 추가
+  A5. StartWorkflowRunUseCase에서 시드 값 검증
+  A6. DTO에 시드 필드 추가 -- CreateWorkflowDto, UpdateWorkflowDto, StartWorkflowRunDto
+  A7. CreateWorkflowUseCase, UpdateWorkflowUseCase에 seedKeys 전달
+  A8. 컨트롤러에서 시드 필드 전달
+  A9. 쿼리 응답에 seedKeys, seedValues 포함
+  B1. 워크스페이스 파일 트리 조회 쿼리 추가
+  B2. 워크스페이스 파일 내용 조회 쿼리 추가
+  B3. 런타임 컨트롤러에 워크스페이스 엔드포인트 추가
+  C1. 프론트엔드 타입에 시드 필드 추가
+  C2. 워크플로우 에디터에 시드 키 편집 UI 추가
+  C3. IssueKeyDialog에 시드 값 입력 추가
+  C4. RunOverviewPanel에 시드 값 표시
+  D1. @monaco-editor/react 패키지 설치
+  D2. WorkspaceViewerPanel 컴포넌트 생성
+  D3. WorkflowRunFlowPage에 워크스페이스 뷰어 통합
+
+아래 6개 Phase를 순서대로 진행한다.
+각 Phase 완료 후 반드시 아래 검증을 실행한다. 검증 실패 시 수정 후 다시 검증한다. 검증 통과 후 다음 Phase로 진행한다.
+  백엔드 검증: cd flow-backend && npm run typecheck && npm run test && npm run lint
+  프론트엔드 검증: cd flow-front && npx tsc -b && npm run lint && npm run build
+각 Phase 완료 후 Playwright MCP를 통해 localhost:5173에 접속하여 실제 화면을 확인하고 문제가 있으면 즉시 수정한다.
+
+
+----- Phase 1 백엔드 도메인 -- 시드 필드 추가 -- A1, A2, A3 -----
+
+핵심 파일:
+  - flow-backend/src/workflow/domain/entities/workflow.ts -- 수정
+  - flow-backend/src/workflow-runtime/domain/entities/workflow-run.ts -- 수정
+  - flow-backend/src/common/ports/workflow-config-reader.ts -- 수정
+참조할 코드 -- 읽기만, 수정하지 않음:
+  - flow-backend/src/workflow/domain/value-objects/work-definition.ts -- VO 패턴 참조
+  - flow-backend/src/workflow-runtime/domain/value-objects/task-node-config.ts -- TaskNodeConfig 구조
+
+1-1. Workflow 엔티티 수정 -- flow-backend/src/workflow/domain/entities/workflow.ts
+
+     A. WorkflowCreateProps 인터페이스에 필드 추가:
+        readonly seedKeys -- 선택적 -- 타입 string 배열
+
+     B. WorkflowFromProps 인터페이스에 필드 추가:
+        readonly seedKeys -- 필수 -- 타입 string 배열
+
+     C. 클래스에 private 필드 추가 -- _mcpServerRefs 바로 아래:
+        private _seedKeys -- 타입 string 배열
+
+     D. private constructor의 props 타입 객체에 추가:
+        seedKeys -- 타입 string 배열
+
+     E. constructor 본문에 추가:
+        this._seedKeys = 스프레드 연산자로 props.seedKeys 복사
+
+     F. static create에서 new Workflow 호출 시 추가:
+        seedKeys: props.seedKeys 또는 빈 배열
+
+     G. static fromProps에서 new Workflow 호출 시 추가:
+        seedKeys: props.seedKeys
+
+     H. getter 추가 -- mcpServerRefs getter 아래:
+        get seedKeys -- 반환 타입 ReadonlyArray of string
+        return 스프레드로 this._seedKeys 복사
+
+     I. updateSeedKeys 메서드 추가 -- updateWorkDefinitions 메서드 아래:
+        파라미터: seedKeys 타입 string 배열
+        guardDraftStatus 호출
+        this._seedKeys = 스프레드로 seedKeys 복사
+        incrementVersion 호출
+        addDomainEvent -- WorkflowUpdated with workflowId: this._id
+
+     J. validateInvariants 메서드에 추가 -- 기존 검증 아래:
+        seedKeys 중복 검사:
+          new Set을 this._seedKeys로 생성하고 size가 this._seedKeys.length와 다르면
+          WorkflowInvariantViolationError with 메시지 Seed keys must be unique
+
+1-2. WorkflowRun 엔티티 수정 -- flow-backend/src/workflow-runtime/domain/entities/workflow-run.ts
+
+     A. WorkflowRunCreateProps에 필드 추가:
+        seedValues -- 선택적 -- 타입 Readonly of Record -- string 키, string 값
+
+     B. WorkflowRunFromProps에 필드 추가:
+        seedValues -- 필수 -- 타입 Readonly of Record -- string 키, string 값
+
+     C. 클래스에 private readonly 필드 추가 -- _restoredToCheckpoint 위에:
+        private readonly _seedValues -- 타입 Readonly of Record -- string 키, string 값
+
+     D. private constructor에서 추가:
+        this._seedValues = Object.freeze로 스프레드 복사한 props.seedValues
+
+     E. static create에서 new WorkflowRun 호출 시 추가:
+        seedValues: props.seedValues 또는 빈 객체
+
+     F. getter 추가 -- restoredToCheckpoint getter 아래:
+        get seedValues -- 반환 타입 Readonly of Record -- string 키, string 값
+        return this._seedValues
+
+1-3. WorkflowConfig 인터페이스 수정 -- flow-backend/src/common/ports/workflow-config-reader.ts
+
+     WorkflowConfig 인터페이스에 필드 추가 -- workDefinitions 위에:
+       readonly seedKeys -- 타입 ReadonlyArray of string
+
+1-4. 백엔드 검증 실행
+     컴파일 오류가 발생할 수 있다 -- WorkflowConfig 구현체와 fromProps 호출하는 테스트에서.
+     오류 발생 시:
+       1. WorkflowConfigReader 구현체를 검색 -- extends WorkflowConfigReader 로 grep
+          해당 파일에서 config 객체 생성 시 seedKeys: workflow.seedKeys 매핑 추가
+       2. Workflow.fromProps 호출하는 테스트에 seedKeys: 빈 배열 추가
+       3. WorkflowRun.fromProps 호출하는 테스트에 seedValues: 빈 객체 추가
+       4. InMemory 리포지토리 직렬화 코드가 있으면 새 필드 포함
+
+
+----- Phase 2 백엔드 애플리케이션 -- 시드 로직과 DTO와 쿼리 -- A4, A5, A6, A7, A8, A9 -----
+
+핵심 파일:
+  - flow-backend/src/workflow-runtime/application/factories/workflow-run-factory.ts -- 수정
+  - flow-backend/src/workflow-runtime/application/commands/start-workflow-run-use-case.ts -- 수정
+  - flow-backend/src/workflow/presentation/dto/create-workflow.dto.ts -- 수정
+  - flow-backend/src/workflow/presentation/dto/update-workflow.dto.ts -- 수정
+  - flow-backend/src/workflow-runtime/presentation/dto/start-workflow-run.dto.ts -- 수정
+  - flow-backend/src/workflow/presentation/workflow.controller.ts -- 수정
+  - flow-backend/src/workflow/application/commands/create-workflow-use-case.ts -- 수정
+  - flow-backend/src/workflow/application/commands/update-workflow-use-case.ts -- 수정
+  - flow-backend/src/workflow-runtime/presentation/workflow-runtime.controller.ts -- 수정
+  - flow-backend/src/workflow-runtime/application/queries/ -- 여러 파일 수정
+참조할 코드 -- 읽기만, 수정하지 않음:
+  - flow-backend/src/workflow-runtime/application/commands/send-query-use-case.ts -- 쿼리 처리 패턴
+  - flow-backend/src/common/ports/agent-service.ts -- 포트 패턴
+
+2-1. WorkflowRunFactory 수정 -- A4
+     flow-backend/src/workflow-runtime/application/factories/workflow-run-factory.ts
+
+     build 메서드 시그니처 변경:
+       기존 파라미터: config와 issueKey
+       변경 파라미터: config, issueKey, seedValues
+       seedValues 타입: Record -- string 키, string 값 -- 기본값 빈 객체
+
+     private 메서드 추가 -- resolveQuery:
+       파라미터: query 타입 string, issueKey 타입 string, seedValues 타입 Record
+       반환: string
+       로직:
+         let resolved = query
+         resolved에서 중괄호로 감싼 issueKey 마커를 issueKey 값으로 replaceAll
+         seedValues의 각 key-value 쌍에 대해:
+           resolved에서 중괄호로 감싼 seed:key 마커를 value로 replaceAll
+         return resolved
+       참고: 중괄호 형식은 branchStrategy의 issueKey 치환과 동일.
+             String.prototype.replaceAll 사용.
+
+     build 메서드 내 taskConfigs 생성 부분 수정:
+       기존: TaskNodeConfig.create with td.order, td.query, reportOutline
+       변경: TaskNodeConfig.create with td.order, this.resolveQuery with td.query 그리고 issueKey 그리고 seedValues, reportOutline
+
+     WorkflowRun.create 호출 시 seedValues 전달:
+       기존 props 객체에 seedValues: seedValues 추가
+
+2-2. StartWorkflowRunUseCase 수정 -- A5
+     flow-backend/src/workflow-runtime/application/commands/start-workflow-run-use-case.ts
+
+     StartWorkflowRunCommand 인터페이스에 추가:
+       readonly seedValues -- 선택적 -- 타입 Record -- string 키, string 값
+
+     새 에러 클래스 추가 -- 기존 에러 클래스들 아래:
+       MissingSeedValuesError extends ApplicationError
+       constructor 파라미터: missingKeys 타입 string 배열
+       code: MISSING_SEED_VALUES
+       message: Missing seed values for keys: 쉼표로 구분된 missingKeys
+
+     execute 메서드에서 workflow 조회 후, trimmedKey 검증 후, try 블록 안 상단에 추가:
+       workflow.seedKeys가 있고 length가 0보다 크면:
+         const provided = command.seedValues 또는 빈 객체
+         const missingKeys = workflow.seedKeys를 filter:
+           key가 provided에 없거나 provided의 해당 값이 빈 문자열이면 포함
+         missingKeys.length가 0보다 크면:
+           throw new MissingSeedValuesError with missingKeys
+
+     factory.build 호출 수정:
+       기존: this.workflowRunFactory.build with workflow, trimmedKey
+       변경: this.workflowRunFactory.build with workflow, trimmedKey, command.seedValues 또는 빈 객체
+
+2-3. CreateWorkflowDto 수정 -- A6
+     flow-backend/src/workflow/presentation/dto/create-workflow.dto.ts
+
+     클래스에 필드 추가 -- mcpServerRefs 아래:
+       @IsOptional 데코레이터
+       @IsArray 데코레이터
+       @IsString -- each: true 옵션 -- 데코레이터
+       seedKeys -- 선택적 -- 타입 string 배열
+
+2-4. UpdateWorkflowDto 수정 -- A6
+     flow-backend/src/workflow/presentation/dto/update-workflow.dto.ts
+
+     클래스에 필드 추가:
+       @IsOptional 데코레이터
+       @IsArray 데코레이터
+       @IsString -- each: true 옵션 -- 데코레이터
+       seedKeys -- 선택적 -- 타입 string 배열
+
+2-5. StartWorkflowRunDto 수정 -- A6
+     flow-backend/src/workflow-runtime/presentation/dto/start-workflow-run.dto.ts
+
+     클래스에 필드 추가 -- issueKey 아래:
+       @IsOptional 데코레이터
+       seedValues -- 선택적 -- 타입 Record -- string 키, string 값
+
+2-6. CreateWorkflowUseCase 수정 -- A7
+     flow-backend/src/workflow/application/commands/create-workflow-use-case.ts
+
+     CreateWorkflowCommand 인터페이스에 추가:
+       readonly seedKeys -- 선택적 -- 타입 string 배열
+
+     execute에서 Workflow.create 호출 시 추가:
+       seedKeys: command.seedKeys
+
+2-7. UpdateWorkflowUseCase 수정 -- A7
+     flow-backend/src/workflow/application/commands/update-workflow-use-case.ts
+
+     UpdateWorkflowCommand 인터페이스에 추가:
+       readonly seedKeys -- 선택적 -- 타입 string 배열
+
+     execute에서 command.seedKeys가 undefined가 아니면:
+       workflow.updateSeedKeys with command.seedKeys
+
+2-8. WorkflowController 수정 -- A8
+     flow-backend/src/workflow/presentation/workflow.controller.ts
+
+     create 메서드에서 createUseCase.execute 호출 시 추가:
+       seedKeys: dto.seedKeys
+
+     update 메서드에서 updateUseCase.execute 호출 시 추가:
+       seedKeys: dto.seedKeys
+
+2-9. WorkflowRuntimeController 수정 -- A8
+     flow-backend/src/workflow-runtime/presentation/workflow-runtime.controller.ts
+
+     start 메서드에서 command 객체에 추가:
+       seedValues: dto.seedValues
+
+2-10. 쿼리 응답에 시드 필드 추가 -- A9
+
+      GetWorkflowQuery 수정:
+        flow-backend/src/workflow/application/queries/get-workflow-query.ts
+        응답 객체에 seedKeys 추가: workflow.seedKeys를 배열로 스프레드 복사
+
+      ListWorkflowsQuery 수정:
+        flow-backend/src/workflow/application/queries/list-workflows-query.ts
+        각 워크플로우 응답 객체에 seedKeys 추가
+
+      GetWorkflowRunQuery 수정:
+        flow-backend/src/workflow-runtime/application/queries/get-workflow-run-query.ts
+        응답 객체에 seedValues 추가: run.seedValues
+        응답 객체에 seedKeys 추가 -- 워크플로우 정의의 시드 키 목록.
+        WorkflowConfigReader 의존성이 없으면 추가하고,
+          const workflow = await this.workflowConfigReader.findById with run.workflowId
+          seedKeys: workflow의 seedKeys 또는 빈 배열
+
+      ListWorkflowRunsQuery 수정:
+        flow-backend/src/workflow-runtime/application/queries/list-workflow-runs-query.ts
+        각 런 응답 객체에 seedValues 추가: run.seedValues
+
+2-11. 테스트 코드 수정:
+      npm run typecheck 실행 후 컴파일 오류가 있는 테스트 파일을 모두 수정.
+      Workflow.fromProps 호출에 seedKeys: 빈 배열 추가.
+      WorkflowRun.fromProps 호출에 seedValues: 빈 객체 추가.
+      WorkflowRunFactory.build 호출에 세 번째 인자 빈 객체 추가.
+      WorkflowConfig 모킹 객체에 seedKeys: 빈 배열 추가.
+
+2-12. 백엔드 검증 실행
+
+
+----- Phase 3 백엔드 -- 워크스페이스 파일 탐색 엔드포인트 -- B1, B2, B3 -----
+
+핵심 파일:
+  - flow-backend/src/workflow-runtime/application/queries/get-workspace-tree-query.ts -- 신규
+  - flow-backend/src/workflow-runtime/application/queries/get-workspace-file-query.ts -- 신규
+  - flow-backend/src/workflow-runtime/presentation/workflow-runtime.controller.ts -- 수정
+  - flow-backend/src/workflow-runtime/presentation/workflow-runtime.module.ts -- 수정
+참조할 코드 -- 읽기만, 수정하지 않음:
+  - flow-backend/src/workflow-runtime/application/queries/get-report-query.ts -- 쿼리 패턴
+  - flow-backend/src/workflow-runtime/domain/ports/file-system.ts -- FileSystem 포트
+  - flow-backend/src/workflow-runtime/infra/node-file-system.ts -- 구현체
+
+3-1. GetWorkspaceTreeQuery 생성 -- B1
+     flow-backend/src/workflow-runtime/application/queries/get-workspace-tree-query.ts
+
+     export interface FileTreeEntry:
+       readonly path -- string -- 워크스페이스 루트 기준 상대 경로
+       readonly isDirectory -- boolean
+       readonly size -- number
+
+     @Injectable 데코레이터.
+     생성자 주입:
+       - WorkflowSpaceRepository
+       - FileSystem
+
+     async execute -- 파라미터: workflowRunId 타입 WorkflowRunId
+       반환: Promise of FileTreeEntry 배열
+
+     execute 로직:
+       1. workflowSpace = await workflowSpaceRepository.findByWorkflowRunId with workflowRunId
+          없으면 ApplicationError with WORKSPACE_NOT_FOUND 코드
+       2. entries: FileTreeEntry 배열을 빈 배열로 초기화
+       3. 재귀 함수 walkDirectory 정의:
+          파라미터: dirPath 타입 string, relativePath 타입 string
+          items = await fileSystem.list with dirPath
+          각 item에 대해:
+            fullPath = path 모듈의 join with dirPath, item
+            relPath = relativePath가 빈 문자열이면 item, 아니면 path.join with relativePath, item
+            try 블록:
+              statResult = await fileSystem.stat with fullPath
+              entries에 추가: path: relPath, isDirectory: statResult.isDirectory, size: statResult.size
+              statResult.isDirectory이고 item이 다음 목록에 포함되지 않으면 재귀:
+                node_modules, .git, .claude, __pycache__, .next, dist, build
+                재귀 호출: walkDirectory with fullPath, relPath
+            catch 블록:
+              무시 -- symlink 등 읽을 수 없는 항목 스킵
+       4. await walkDirectory with workflowSpace.path, 빈 문자열
+       5. entries를 path 기준 알파벳 정렬하여 반환
+
+     import: path from node:path
+     import: Injectable from @nestjs/common
+     import: WorkflowSpaceRepository from 도메인 인덱스
+     import: FileSystem from 도메인 포트
+     import: ApplicationError from @common/errors/index.js
+     import: WorkflowRunId -- 타입 임포트
+
+3-2. GetWorkspaceFileQuery 생성 -- B2
+     flow-backend/src/workflow-runtime/application/queries/get-workspace-file-query.ts
+
+     export interface WorkspaceFileContent:
+       readonly content -- string
+       readonly path -- string
+
+     @Injectable 데코레이터.
+     생성자 주입:
+       - WorkflowSpaceRepository
+       - FileSystem
+
+     async execute -- 파라미터: workflowRunId 타입 WorkflowRunId, filePath 타입 string
+       반환: Promise of WorkspaceFileContent
+
+     execute 로직:
+       1. workflowSpace = await workflowSpaceRepository.findByWorkflowRunId with workflowRunId
+          없으면 ApplicationError with WORKSPACE_NOT_FOUND 코드
+       2. 경로 보안 검증:
+          const resolvedPath = path.resolve with workflowSpace.path, filePath
+          const normalizedBase = path.resolve with workflowSpace.path
+          resolvedPath가 normalizedBase로 시작하지 않으면:
+            throw ApplicationError with INVALID_FILE_PATH 코드, 접근이 허용되지 않는 경로입니다
+       3. statResult = await fileSystem.stat with resolvedPath
+          statResult.isDirectory이면:
+            throw ApplicationError with INVALID_FILE_PATH 코드, 디렉토리는 읽을 수 없습니다
+          statResult.size가 1048576보다 크면:
+            throw ApplicationError with FILE_TOO_LARGE 코드, 파일 크기가 1MB를 초과합니다
+       4. content = await fileSystem.readFile with resolvedPath
+       5. return 객체: path: filePath, content: content
+
+     import: path from node:path
+     import: Injectable from @nestjs/common
+     import: WorkflowSpaceRepository from 도메인 인덱스
+     import: FileSystem from 도메인 포트
+     import: ApplicationError from @common/errors/index.js
+     import: WorkflowRunId -- 타입 임포트
+
+3-3. 컨트롤러에 엔드포인트 추가 -- B3
+     flow-backend/src/workflow-runtime/presentation/workflow-runtime.controller.ts
+
+     생성자에 주입 추가:
+       private readonly getWorkspaceTreeQuery: GetWorkspaceTreeQuery
+       private readonly getWorkspaceFileQuery: GetWorkspaceFileQuery
+
+     GET 엔드포인트 추가 -- 기존 엔드포인트들 아래:
+       @Get with :id/workspace/tree 경로
+       async getWorkspaceTree 메서드:
+         @Param id with BrandedIdPipe of WorkflowRunId 파라미터
+         return this.getWorkspaceTreeQuery.execute with id
+
+     GET 엔드포인트 추가:
+       @Get with :id/workspace/file 경로
+       async getWorkspaceFile 메서드:
+         @Param id with BrandedIdPipe of WorkflowRunId 파라미터
+         @Query -- path -- 파라미터: filePath 타입 string
+         return this.getWorkspaceFileQuery.execute with id, filePath
+
+     주의: @Query 데코레이터로 쿼리 파라미터 path를 받는다.
+     import 추가: Query from @nestjs/common -- 기존 import에 합침
+     import 추가: GetWorkspaceTreeQuery, GetWorkspaceFileQuery
+
+3-4. 모듈에 쿼리 등록 -- B3
+     flow-backend/src/workflow-runtime/presentation/workflow-runtime.module.ts
+
+     providers 배열에 추가:
+       GetWorkspaceTreeQuery
+       GetWorkspaceFileQuery
+
+     import 추가:
+       GetWorkspaceTreeQuery from ../application/queries/get-workspace-tree-query.js
+       GetWorkspaceFileQuery from ../application/queries/get-workspace-file-query.js
+
+3-5. 백엔드 검증 실행
+
+
+----- Phase 4 프론트엔드 -- 시드 UI -- C1, C2, C3, C4 -----
+
+핵심 파일:
+  - flow-front/src/api/types.ts -- 수정
+  - flow-front/src/pages/WorkflowFlowEditorPage.tsx -- 수정
+  - flow-front/src/components/flow/panels/WorkflowInfoPanel.tsx -- 수정
+  - flow-front/src/components/IssueKeyDialog.tsx -- 수정
+  - flow-front/src/components/flow/panels/RunOverviewPanel.tsx -- 수정
+  - flow-front/src/pages/WorkflowRunFlowPage.tsx -- 수정
+참조할 코드 -- 읽기만, 수정하지 않음:
+  - flow-front/src/hooks/useWorkflowRuns.ts -- mutation 패턴
+  - flow-front/src/api/workflow-runs.ts -- API 호출 패턴
+
+4-1. 타입 추가 -- flow-front/src/api/types.ts
+
+     CreateWorkflowRequest에 추가:
+       seedKeys -- 선택적 -- string 배열
+
+     UpdateWorkflowRequest에 추가:
+       seedKeys -- 선택적 -- string 배열
+
+     WorkflowResponse에 추가:
+       seedKeys -- string 배열
+
+     WorkflowListItem에 추가:
+       seedKeys -- string 배열
+
+     StartWorkflowRunRequest에 추가:
+       seedValues -- 선택적 -- Record -- string 키, string 값
+
+     WorkflowRunDetailResponse에 추가:
+       seedValues -- 선택적 -- Record -- string 키, string 값
+       seedKeys -- 선택적 -- string 배열 -- 워크플로우 정의의 시드 키 목록
+
+4-2. 워크플로우 폼 스키마 수정 -- flow-front/src/pages/WorkflowFlowEditorPage.tsx
+
+     workflowFormSchema에 seedKeys 추가:
+       seedKeys: z.array with z.string 항목 -- .optional
+
+     defaultValues에 추가:
+       seedKeys: 빈 배열
+
+     useEffect 내 form.reset 호출 객체에 추가:
+       seedKeys: workflow.seedKeys 또는 빈 배열
+
+     onSubmit의 normalized 객체에 추가:
+       seedKeys: values.seedKeys
+       createMutation과 updateMutation 호출 시 데이터에 포함되도록 확인
+
+4-3. WorkflowInfoPanel 수정 -- flow-front/src/components/flow/panels/WorkflowInfoPanel.tsx
+
+     McpRefPanel 아래에 시드 키 관리 섹션 추가.
+
+     구현:
+       const seedKeys = form.watch with seedKeys 경로 -- 또는 빈 배열
+       useState로 newSeedKey 상태 관리
+
+       시드 변수 라벨 표시 -- h4 또는 label 태그
+       설명 텍스트: 태스크 쿼리에서 템플릿으로 사용할 변수 키를 정의합니다
+
+       현재 키 목록 표시:
+         각 키를 div로 표시 -- 키 이름 텍스트 + 삭제 X 버튼
+         삭제 클릭 시:
+           form.setValue with seedKeys 경로, 기존 배열에서 해당 인덱스 제거한 새 배열
+
+       하단에 추가 UI:
+         Input -- newSeedKey 바인딩, placeholder: 변수 키 입력
+         추가 버튼 -- 클릭 시:
+           newSeedKey가 비어있지 않으면:
+             form.setValue with seedKeys 경로, 기존 배열 + newSeedKey
+             setNewSeedKey to 빈 문자열
+
+       isEdit이 false -- 뷰 모드 -- 이면 추가/삭제 비활성화
+
+4-4. IssueKeyDialog 수정 -- flow-front/src/components/IssueKeyDialog.tsx
+
+     IssueKeyDialogProps에 추가:
+       seedKeys -- 선택적 -- string 배열
+       defaultSeedValues -- 선택적 -- Record -- string 키, string 값
+       onConfirm 타입 변경:
+         기존: issueKey 하나의 string 파라미터
+         변경: issueKey 타입 string, seedValues 타입 Record -- string 키, string 값
+
+     IssueKeyForm props에 추가:
+       seedKeys 전달
+       defaultSeedValues 전달
+       onConfirm 타입도 동일하게 변경
+
+     IssueKeyForm 내부 수정:
+       useState로 seedValues 상태 추가:
+         초기값: defaultSeedValues 또는 빈 객체
+
+       이슈 키 입력란 아래에 시드 값 입력 섹션 추가:
+         seedKeys가 있고 length가 0보다 크면:
+           시드 값 라벨 표시
+           각 seedKey에 대해 div 렌더링:
+             label: seedKey 이름
+             Input: value는 seedValues의 해당 키 값
+             onChange: seedValues 상태에서 해당 키의 값 업데이트
+
+       유효성 검사 추가:
+         isSeedValid 변수: seedKeys가 없거나 length가 0이면 true,
+           아니면 모든 seedKey에 대해 seedValues의 값이 비어있지 않은 문자열인지 every 검사
+         실행 버튼의 disabled 조건에 isSeedValid 추가: isValid 그리고 isSeedValid
+
+       onConfirm 호출 수정:
+         기존: onConfirm with issueKey.trim
+         변경: onConfirm with issueKey.trim, seedValues
+
+     모든 IssueKeyDialog 사용처를 검색하여 onConfirm 콜백 시그니처 변경에 맞게 수정.
+     현재 사용처: WorkflowRunFlowPage의 재실행 다이얼로그.
+
+4-5. WorkflowRunFlowPage 수정 -- flow-front/src/pages/WorkflowRunFlowPage.tsx
+
+     IssueKeyDialog에 seedKeys prop 전달:
+       seedKeys: runDetail.seedKeys
+
+     IssueKeyDialog에 defaultSeedValues prop 전달:
+       defaultSeedValues: runDetail.seedValues
+
+     IssueKeyDialog의 onConfirm 콜백 수정:
+       기존: issueKey만 받아서 startNewRunMutation 호출
+       변경: issueKey와 seedValues를 받아서:
+         startNewRunMutation.mutate with
+           workflowId: runDetail.workflowId, issueKey: issueKey, seedValues: seedValues
+         onSuccess 콜백은 기존과 동일
+
+4-6. RunOverviewPanel 수정 -- flow-front/src/components/flow/panels/RunOverviewPanel.tsx
+
+     이슈 키 표시 div 아래에 시드 값 표시 섹션 추가:
+       runDetail.seedValues가 있고 Object.keys -- runDetail.seedValues -- 의 length가 0보다 크면:
+         div 래퍼:
+           p 태그 -- text-sm text-muted-foreground -- 라벨: 시드 값
+           Object.entries -- runDetail.seedValues -- 로 각 key-value에 대해:
+             p 태그 -- text-sm -- key: value 형태로 표시
+
+4-7. 프론트엔드 검증 실행
+
+
+----- Phase 5 프론트엔드 -- 모나코 워크스페이스 뷰어 -- D1, D2, D3 -----
+
+핵심 파일:
+  - flow-front/package.json -- 수정
+  - flow-front/src/api/types.ts -- 수정
+  - flow-front/src/api/workflow-runs.ts -- 수정
+  - flow-front/src/lib/query-keys.ts -- 수정
+  - flow-front/src/components/flow/panels/WorkspaceViewerPanel.tsx -- 신규
+  - flow-front/src/pages/WorkflowRunFlowPage.tsx -- 수정
+참조할 코드 -- 읽기만, 수정하지 않음:
+  - flow-front/src/components/flow/panels/WorkExecutionDetailPanel.tsx -- 패널 패턴
+  - flow-front/src/hooks/useWorkflowRuns.ts -- useQuery 패턴
+
+5-1. @monaco-editor/react 설치 -- D1
+     cd flow-front && npm install @monaco-editor/react
+
+5-2. 타입 추가 -- flow-front/src/api/types.ts
+
+     FileTreeEntry 인터페이스 추가 -- 파일 하단에:
+       path -- string
+       isDirectory -- boolean
+       size -- number
+
+     WorkspaceFileContent 인터페이스 추가:
+       content -- string
+       path -- string
+
+5-3. API 모듈 수정 -- flow-front/src/api/workflow-runs.ts
+
+     workflowRunsApi 객체에 메서드 추가:
+
+       getWorkspaceTree: id를 받아서
+         apiClient.get -- 제네릭: unknown, FileTreeEntry 배열
+         경로: /workflow-runs/ + id + /workspace/tree
+
+       getWorkspaceFile: id와 filePath를 받아서
+         apiClient.get -- 제네릭: unknown, WorkspaceFileContent
+         경로: /workflow-runs/ + id + /workspace/file
+         params 객체: path: filePath
+
+     import에 FileTreeEntry, WorkspaceFileContent 추가
+
+5-4. 쿼리 키 추가 -- flow-front/src/lib/query-keys.ts
+
+     workflowRuns 객체에 추가:
+       workspaceTree: id를 받아서 배열 반환 -- workflow-runs, id, workspace-tree 요소
+       workspaceFile: id와 filePath를 받아서 배열 반환 -- workflow-runs, id, workspace-file, filePath 요소
+
+5-5. WorkspaceViewerPanel 생성 -- D2
+     flow-front/src/components/flow/panels/WorkspaceViewerPanel.tsx
+
+     Props 인터페이스:
+       runId -- string
+       onClose -- 함수 -- 반환 void
+
+     컴포넌트 구조:
+       상태: selectedFilePath -- string 또는 null, 초기값 null
+
+       useQuery로 파일 트리 조회:
+         queryKey: queryKeys.workflowRuns.workspaceTree with runId
+         queryFn: workflowRunsApi.getWorkspaceTree with runId
+
+       useQuery로 파일 내용 조회:
+         queryKey: queryKeys.workflowRuns.workspaceFile with runId, selectedFilePath
+         queryFn: workflowRunsApi.getWorkspaceFile with runId, selectedFilePath
+         enabled: selectedFilePath가 null이 아님
+
+       레이아웃 -- 전체 높이, flex column:
+         헤더 바:
+           워크스페이스 탐색 제목 텍스트
+           닫기 버튼 -- onClose 호출
+           선택된 파일 경로 표시 -- selectedFilePath가 있으면
+
+         콘텐츠 영역 -- flex row, 남은 공간 채움:
+           좌측: 파일 트리 영역 -- w-64, border-r, overflow-y-auto
+             FileTree 서브 컴포넌트 렌더링
+           우측: 에디터 영역 -- flex-1
+             selectedFilePath가 null이면:
+               안내 메시지 -- 파일을 선택하세요 -- 중앙 정렬
+             파일 내용 로딩 중이면:
+               LoadingSpinner 컴포넌트
+             파일 내용이 있으면:
+               Editor 컴포넌트 from @monaco-editor/react
+
+       Monaco Editor 설정:
+         import Editor from @monaco-editor/react
+         Editor 속성:
+           height: 100%
+           language: getLanguageFromPath with selectedFilePath 호출 결과
+           value: fileContentQuery.data.content
+           theme: vs-light
+           options 객체:
+             readOnly: true
+             minimap: enabled false
+             scrollBeyondLastLine: false
+             fontSize: 13
+             wordWrap: on
+
+     getLanguageFromPath 유틸 함수 -- 같은 파일 상단에 정의:
+       확장자 매핑:
+         .ts, .tsx -- typescript
+         .js, .jsx -- javascript
+         .json -- json
+         .md -- markdown
+         .css -- css
+         .html -- html
+         .yaml, .yml -- yaml
+         .py -- python
+         .sh -- shell
+         .sql -- sql
+         .xml -- xml
+         기본값: plaintext
+       구현: 파일 경로에서 마지막 점 이후 확장자를 추출하여 매핑
+
+     FileTree 서브 컴포넌트 -- 같은 파일 내부에 정의:
+
+       flat 목록을 트리 구조로 변환하는 buildTree 함수:
+         TreeNode 인터페이스: name string, fullPath string, isDirectory boolean, children TreeNode 배열
+         flat entries를 순회하며:
+           path를 / 로 분할하여 부모-자식 관계 구축
+           디렉토리 우선, 이름 알파벳순 정렬
+
+       TreeItem 재귀 컴포넌트:
+         props: node TreeNode, depth number, selectedPath string 또는 null, onSelect 콜백
+         디렉토리:
+           클릭 시 expanded 토글 -- useState
+           lucide-react의 FolderOpen 또는 Folder 아이콘 사용
+           expanded이면 children 렌더링
+         파일:
+           클릭 시 onSelect with node.fullPath
+           lucide-react의 File 아이콘 사용
+           selectedPath와 node.fullPath가 같으면 배경색 강조 -- bg-accent
+         들여쓰기: depth에 비례하여 paddingLeft 적용 -- depth 곱하기 16px
+
+     import 추가:
+       Editor from @monaco-editor/react
+       useQuery from @tanstack/react-query
+       workflowRunsApi from @/api/workflow-runs
+       queryKeys from @/lib/query-keys
+       File, Folder, FolderOpen, X from lucide-react
+       LoadingSpinner from @/components/LoadingSpinner
+       Button from @/components/ui/button
+
+5-6. WorkflowRunFlowPage 수정 -- D3
+     flow-front/src/pages/WorkflowRunFlowPage.tsx
+
+     SelectedPanel 유니온 타입에 추가:
+       type: workspace 항목
+
+     상단 버튼 영역에 워크스페이스 탐색 버튼 추가:
+       COMPLETED 또는 CANCELLED 상태일 때 표시 -- 재실행 버튼 옆에
+       lucide-react의 Code 아이콘 사용
+       Button 컴포넌트 -- variant outline, size sm
+       버튼 라벨: 파일 탐색
+       클릭 시 setSelectedPanel with type: workspace
+
+     메인 콘텐츠 영역 수정:
+       selectedPanel.type이 workspace이면:
+         FlowCanvas와 사이드 패널 대신 WorkspaceViewerPanel만 전체 너비로 표시
+         WorkspaceViewerPanel에 runId: id, onClose: setSelectedPanel to overview 전달
+
+       selectedPanel.type이 workspace가 아니면:
+         기존 FlowCanvas + 사이드 패널 레이아웃 유지
+
+     import 추가:
+       WorkspaceViewerPanel from @/components/flow/panels/WorkspaceViewerPanel
+       Code from lucide-react
+
+5-7. 프론트엔드 검증 실행
+
+
+----- Phase 6 통합 검증 -----
+
+6-1. 백엔드 서버 빌드 후 실행:
+     cd flow-backend && npm run build && npm run start
+     npm run start:dev는 사용하지 않는다 -- tsx가 emitDecoratorMetadata를 지원하지 않음
+
+6-2. 프론트엔드 dev 서버 실행:
+     cd flow-front && npm run dev
+
+6-3. Playwright MCP로 다음 시나리오를 검증:
+
+     시나리오 A -- 시드 키 정의:
+       /workflows/new 페이지 접속
+       워크플로우 정보 패널에서 시드 변수 섹션 확인
+       시드 키 2개 추가: sourceFile 그리고 outputFormat
+       태스크 쿼리에 시드 템플릿 마커 포함하여 작성
+       나머지 필수 필드 채운 후 저장
+       저장 후 상세 페이지에서 시드 키 목록이 표시되는지 확인
+
+     시나리오 B -- 시드 값과 함께 실행:
+       ACTIVE 상태 워크플로우의 실행 버튼 클릭
+       IssueKeyDialog에 이슈 키 입력란과 시드 값 입력란이 모두 표시되는지 확인
+       각 시드 키에 대응하는 입력란이 있는지 확인
+       시드 값을 모두 입력하고 실행 클릭
+       런타임 상세 페이지 /workflow-runs/:id 이동 후:
+         RunOverviewPanel에 시드 값이 표시되는지 확인
+
+     시나리오 C -- 시드 값 누락 시 실행 불가:
+       시드 키가 정의된 워크플로우에서 실행 다이얼로그 열기
+       시드 값을 비워둔 채로 실행 버튼이 비활성화 상태인지 확인
+       또는 API 에러 메시지가 표시되는지 확인
+
+     시나리오 D -- 워크스페이스 파일 탐색:
+       완료 또는 취소 상태의 워크플로우 런타임 상세 페이지 접속
+       상단에 파일 탐색 버튼이 표시되는지 확인
+       버튼 클릭 시 플로우 캔버스가 사라지고 워크스페이스 뷰어가 전체 너비로 표시
+       좌측 파일 트리에 디렉토리와 파일이 표시되는지 확인
+       디렉토리 클릭 시 접기/펼치기 동작 확인
+       파일 클릭 시 우측 모나코 에디터에 파일 내용 표시 확인
+       에디터가 읽기 전용인지 확인 -- 텍스트 입력 시도 후 변경 불가 확인
+       닫기 버튼 클릭 시 플로우 캔버스로 복귀 확인
+
+     시나리오 E -- RUNNING 상태에서 파일 탐색 불가:
+       실행 중인 런타임에서는 파일 탐색 버튼이 표시되지 않는지 확인
+
+6-4. 문제 발견 시 즉시 수정하고 재검증
+
+6-5. 최종 검증 실행:
+     cd flow-backend && npm run typecheck && npm run test && npm run lint
+     cd flow-front && npx tsc -b && npm run lint && npm run build
+
+모든 Phase가 완료되고 전체 시나리오 검증이 통과하면 SEED TEMPLATE + MONACO WORKSPACE VIEWER COMPLETE 를 출력한다.

@@ -1,0 +1,23 @@
+# OS
+.DS_Store
+
+# Node
+node_modules/
+
+# Sub-project build artifacts
+flow-backend/dist/
+flow-front/dist/
+
+# Sub-project local data
+flow-backend/workflow-spaces/
+
+# Playwright MCP
+.playwright-mcp/
+
+# Claude runtime state
+.claude/ralph-loop.local.md
+.claude/settings.local.json
+flow-backend/.claude/settings.local.json
+
+# Plan files
+.claude/plans/
