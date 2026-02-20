@@ -21,7 +21,7 @@ npm run build && npm run start
 
 > `npm run start:dev` (tsx)는 사용 불가 — tsx/esbuild가 `emitDecoratorMetadata`를 지원하지 않아 NestJS DI가 동작하지 않는다.
 
-> 기본적으로 인메모리 리포지토리를 사용한다. PostgreSQL 연결이 필요하면 `USE_DB=true`를 설정한다.
+> 기본적으로 -인메모리- PostgreSQL 리포지토리를 사용한다. 인메모리 연결이 필요하면 `USE_DB=false`를 설정한다.
 
 ### 프론트엔드
 
