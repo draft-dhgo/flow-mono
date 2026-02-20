@@ -1,5 +1,5 @@
 ---
-name: "Evaluate Project"
+name: "evaluate"
 description: "프로젝트를 종합 평가하여 evaluates/ 디렉토리에 리포트를 생성한다. 백엔드 또는 프론트엔드 프로젝트를 지정할 수 있다."
 ---
 
@@ -20,31 +20,71 @@ description: "프로젝트를 종합 평가하여 evaluates/ 디렉토리에 리
 
 ### 2단계: 데이터 수집 (병렬 실행)
 
-**백엔드 평가 시:**
-- `cd flow-backend && npm run typecheck` — 타입 체크 결과
-- `cd flow-backend && npm run lint` — ESLint 결과 (에러/경고 수, 구체적 파일과 문제)
-- `cd flow-backend && npm run test` — 테스트 결과 (통과/실패 수, 실패 원인)
-- 소스 파일 수 (`flow-backend/src/` 내 .ts 파일)
-- 테스트 파일 수 (`flow-backend/tests/` 내 .test.ts 파일)
-- 모듈별 파일 수와 코드 라인 수
-- `as any` 사용처 검색
-- 도메인 간 직접 import 위반 검색 (feature 디렉토리에서 다른 feature를 `@feature/`로 직접 import하는 경우, `@common/`은 허용)
+**중요: 경로 규칙**
 
-**프론트엔드 평가 시:**
-- `cd flow-front && npx tsc -b` — 타입 체크 결과
-- `cd flow-front && npm run lint` — ESLint 결과
-- `cd flow-front && npm run build` — 빌드 결과
-- 소스 파일 수 (`flow-front/src/` 내 .ts/.tsx 파일)
-- 컴포넌트 수 (`src/components/` 내 .tsx 파일)
-- 페이지 수 (`src/pages/` 내 .tsx 파일)
-- 훅 수 (`src/hooks/` 내 .ts 파일)
-- API 모듈 수 (`src/api/` 내 .ts 파일)
-- `any` 사용처 검색
-- 상대 경로 import 위반 검색 (`@/` alias 미사용)
+모든 Bash 커맨드는 **프로젝트 디렉토리의 절대 경로**를 사용한다. `cd` 후 상대 경로를 쓰면 이전 명령의 CWD 변경으로 실패할 수 있다.
+
+```bash
+# 프로젝트 루트 절대 경로 변수 (개념적)
+PROJECT_ROOT=$(git rev-parse --show-toplevel)
+BACKEND="${PROJECT_ROOT}/flow-backend"
+FRONTEND="${PROJECT_ROOT}/flow-front"
+```
+
+**도구 사용 규칙:**
+- 파일 수 세기: Glob 도구 또는 `find {절대경로} -name '*.ts' | wc -l`
+- 코드 라인 수: `find {절대경로} -name '*.ts' -exec cat {} + | wc -l`
+- 패턴 검색: Grep 도구 (path 파라미터에 절대 경로 사용)
+- 명령어 실행: Bash 도구 — `cd {절대경로} && npm run ...` 형식 사용
+
+**백엔드 평가 시 — 아래 항목을 최대한 병렬 실행:**
+
+1. 검증 커맨드 (각각 별도 Bash 호출로 병렬 실행):
+   - `cd ${BACKEND} && npm run typecheck` — 타입 체크 결과
+   - `cd ${BACKEND} && npm run lint` — ESLint 결과 (에러/경고 수, 구체적 파일과 문제)
+   - `cd ${BACKEND} && npm run test` — 테스트 결과 (통과/실패 수, 실패 원인)
+
+2. 코드 통계 (Bash + Grep/Glob 도구 병렬 실행):
+   - 소스 파일 수: `find ${BACKEND}/src -name '*.ts' | wc -l`
+   - 테스트 파일 수: `find ${BACKEND}/tests -name '*.test.ts' | wc -l`
+   - 소스 코드 라인: `find ${BACKEND}/src -name '*.ts' -exec cat {} + | wc -l`
+   - 테스트 코드 라인: `find ${BACKEND}/tests -name '*.ts' -exec cat {} + | wc -l`
+   - 모듈별 파일 수와 라인 수: `for dir in ${BACKEND}/src/*/; do ...`
+
+3. 품질 검사 (Grep 도구로 병렬 실행):
+   - `as any` 사용처: Grep(pattern="as any", path="${BACKEND}/src")
+   - 도메인 간 직접 import 위반: Task(Explore) 서브에이전트로 검색
+
+4. 아키텍처 참조 (Read 도구로 병렬 실행):
+   - 이전 리포트: `evaluates/backend/{최신번호}.md`
+   - 백엔드 CLAUDE.md: `flow-backend/CLAUDE.md`
+
+**프론트엔드 평가 시 — 아래 항목을 최대한 병렬 실행:**
+
+1. 검증 커맨드 (각각 별도 Bash 호출로 병렬 실행):
+   - `cd ${FRONTEND} && npx tsc -b` — 타입 체크 결과
+   - `cd ${FRONTEND} && npm run lint` — ESLint 결과
+   - `cd ${FRONTEND} && npm run build` — 빌드 결과
+
+2. 코드 통계 (Bash/Glob 도구 병렬 실행):
+   - 소스 파일 수: `find ${FRONTEND}/src -name '*.ts' -o -name '*.tsx' | wc -l`
+   - 컴포넌트 수: Glob(pattern="**/*.tsx", path="${FRONTEND}/src/components")
+   - 페이지 수: Glob(pattern="**/*.tsx", path="${FRONTEND}/src/pages")
+   - 훅 수: Glob(pattern="**/*.ts", path="${FRONTEND}/src/hooks")
+   - API 모듈 수: Glob(pattern="**/*.ts", path="${FRONTEND}/src/api")
+
+3. 품질 검사 (Grep 도구로 병렬 실행):
+   - `any` 사용처: Grep(pattern=": any|as any", path="${FRONTEND}/src")
+   - 상대 경로 import 위반: Grep(pattern="from '\\.\\./|from '\\./", path="${FRONTEND}/src")
+
+4. 아키텍처 참조 (Read 도구로 병렬 실행):
+   - 이전 리포트: `evaluates/frontend/{최신번호}.md`
+   - 프론트엔드 CLAUDE.md: `flow-front/CLAUDE.md`
 
 ### 3단계: 아키텍처 분석
 
 해당 프로젝트의 CLAUDE.md 규칙을 기준으로 코드를 분석한다.
+도메인 간 import 위반, NestJS 데코레이터 검색 등 심층 분석은 **Task(Explore) 서브에이전트**를 활용한다.
 
 **백엔드:**
 - Vertical Slice 구조 준수 여부
