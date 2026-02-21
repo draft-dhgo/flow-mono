@@ -124,7 +124,7 @@ describe('Integration: NestJS App with InMemory repositories', () => {
       const createGitUseCase = app.get(CreateGitUseCase);
       const result = await createGitUseCase.execute({
         url: 'https://github.com/test-org/test-repo.git',
-        localPath: '/tmp/test-repo',
+        localPath: 'test-repo',
       });
 
       expect(result.gitId).toBeDefined();
@@ -191,7 +191,7 @@ describe('Integration: NestJS App with InMemory repositories', () => {
       const createGitUseCase = app.get(CreateGitUseCase);
       const result = await createGitUseCase.execute({
         url: 'https://github.com/cascade-org/cascade-repo.git',
-        localPath: '/tmp/cascade-repo',
+        localPath: 'cascade-repo',
       });
 
       expect(result.gitId).toBeDefined();
@@ -295,7 +295,7 @@ describe('Integration: NestJS App with InMemory repositories', () => {
       const createGitUseCase = app.get(CreateGitUseCase);
       const gitResult = await createGitUseCase.execute({
         url: 'https://github.com/run-org/run-repo.git',
-        localPath: '/tmp/run-repo',
+        localPath: 'run-repo',
       });
       const gitId = gitResult.gitId as GitId;
 
@@ -341,7 +341,7 @@ describe('Integration: NestJS App with InMemory repositories', () => {
       const createGitUseCase = app.get(CreateGitUseCase);
       const gitResult = await createGitUseCase.execute({
         url: 'https://github.com/lifecycle-org/lifecycle-repo.git',
-        localPath: '/tmp/lifecycle-repo',
+        localPath: 'lifecycle-repo',
       });
       const gitId = gitResult.gitId as GitId;
 

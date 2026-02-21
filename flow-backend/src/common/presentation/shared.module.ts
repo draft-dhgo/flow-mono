@@ -4,6 +4,7 @@ import { DataSource } from 'typeorm';
 import { EventPublisher } from '../ports/index.js';
 import { PersistentEventPublisher } from '../infra/persistent-event-publisher.js';
 import { DomainEventSchema } from '../infra/typeorm/domain-event.schema.js';
+import { AllExceptionsFilter } from './filters/all-exceptions.filter.js';
 import { DomainExceptionFilter } from './filters/domain-exception.filter.js';
 import { ApplicationExceptionFilter } from './filters/application-exception.filter.js';
 
@@ -19,6 +20,10 @@ import { ApplicationExceptionFilter } from './filters/application-exception.filt
         return new PersistentEventPublisher(repo ?? null);
       },
       inject: [{ token: DataSource, optional: true }],
+    },
+    {
+      provide: APP_FILTER,
+      useClass: AllExceptionsFilter,
     },
     {
       provide: APP_FILTER,

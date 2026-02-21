@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { execFile } from 'node:child_process';
 import { rm } from 'node:fs/promises';
+import { resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { GitClient } from '../domain/ports/git-client.js';
 import type { GitCloneOptions, GitWorktreeOptions } from '../domain/ports/git-client.js';
@@ -9,16 +10,25 @@ const execFileAsync = promisify(execFile);
 
 @Injectable()
 export class CliGitClient extends GitClient {
+  private reposBasePath: string | null = null;
+
+  /** deleteRepo 경로 검증용 basePath 설정 */
+  setReposBasePath(basePath: string): void {
+    this.reposBasePath = basePath;
+  }
+
   private async exec(cwd: string, args: string[]): Promise<string> {
     const { stdout } = await execFileAsync('git', args, { cwd });
     return stdout;
   }
 
   async clone(options: GitCloneOptions): Promise<void> {
-    const args = ['clone', options.url, options.localPath];
+    const args = ['clone'];
     if (options.branch) {
       args.push('--branch', options.branch);
     }
+    // '--' 구분자로 argument injection 방어
+    args.push('--', options.url, options.localPath);
     await this.exec('.', args);
   }
 
@@ -27,16 +37,16 @@ export class CliGitClient extends GitClient {
     if (options.newBranchName) {
       args.push('-b', options.newBranchName);
     }
-    args.push(options.worktreePath, options.branch);
+    args.push('--', options.worktreePath, options.branch);
     await this.exec(options.repoPath, args);
   }
 
   async deleteWorktree(repoPath: string, worktreePath: string): Promise<void> {
-    await this.exec(repoPath, ['worktree', 'remove', worktreePath, '--force']);
+    await this.exec(repoPath, ['worktree', 'remove', '--force', '--', worktreePath]);
   }
 
   async createBranch(repoPath: string, branch: string, startPoint?: string): Promise<void> {
-    const args = ['branch', branch];
+    const args = ['branch', '--', branch];
     if (startPoint) {
       args.push(startPoint);
     }
@@ -44,7 +54,7 @@ export class CliGitClient extends GitClient {
   }
 
   async deleteBranch(repoPath: string, branch: string): Promise<void> {
-    await this.exec(repoPath, ['branch', '-D', branch]);
+    await this.exec(repoPath, ['branch', '-D', '--', branch]);
   }
 
   async commit(repoPath: string, message: string): Promise<string> {
@@ -77,6 +87,14 @@ export class CliGitClient extends GitClient {
   }
 
   async deleteRepo(repoPath: string): Promise<void> {
+    // 경로 검증: basePath 내부인지 확인하여 임의 경로 삭제 방지
+    if (this.reposBasePath) {
+      const resolved = resolve(repoPath);
+      const base = resolve(this.reposBasePath);
+      if (!resolved.startsWith(base + '/') && resolved !== base) {
+        throw new Error(`Refusing to delete path outside repos base: ${repoPath}`);
+      }
+    }
     await rm(repoPath, { recursive: true, force: true });
   }
 
@@ -98,7 +116,7 @@ export class CliGitClient extends GitClient {
   }
 
   async add(repoPath: string, paths: string[]): Promise<void> {
-    await this.exec(repoPath, ['add', ...paths]);
+    await this.exec(repoPath, ['add', '--', ...paths]);
   }
 
   async removeWorktreeForBranch(repoPath: string, branch: string): Promise<void> {
@@ -109,7 +127,7 @@ export class CliGitClient extends GitClient {
         const pathLine = block.split('\n').find((l) => l.startsWith('worktree '));
         if (pathLine) {
           const worktreePath = pathLine.slice('worktree '.length);
-          await this.exec(repoPath, ['worktree', 'remove', worktreePath, '--force']);
+          await this.exec(repoPath, ['worktree', 'remove', '--force', '--', worktreePath]);
           return;
         }
       }

@@ -8,9 +8,9 @@ describe('GitRepoPathFactory', () => {
     expect(factory.resolve('my-project')).toBe(join('/repos', 'my-project'));
   });
 
-  it('returns absolute paths as-is', () => {
+  it('rejects absolute paths outside base path', () => {
     const factory = new GitRepoPathFactory('/repos');
-    expect(factory.resolve('/absolute/path/to/repo')).toBe('/absolute/path/to/repo');
+    expect(() => factory.resolve('/absolute/path/to/repo')).toThrow('경로가 허용된 범위를 벗어납니다');
   });
 
   it('resolves nested relative paths', () => {
@@ -34,10 +34,9 @@ describe('GitRepoPathFactory', () => {
     expect(resolved).toBe(join('/repos', './my-project'));
   });
 
-  it('handles relative path with parent directory reference', () => {
+  it('rejects relative path with parent directory traversal', () => {
     const factory = new GitRepoPathFactory('/repos/sub');
-    const resolved = factory.resolve('../my-project');
-    expect(resolved).toBe(join('/repos/sub', '../my-project'));
+    expect(() => factory.resolve('../my-project')).toThrow('경로가 허용된 범위를 벗어납니다');
   });
 
   it('resolves empty relative path to base path', () => {

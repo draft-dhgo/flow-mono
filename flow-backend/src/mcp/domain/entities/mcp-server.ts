@@ -68,6 +68,28 @@ export class McpServer extends AggregateRoot<McpServerId> {
     }
   }
 
+  /** 허용되는 MCP 서버 커맨드 화이트리스트 */
+  private static readonly ALLOWED_COMMANDS = new Set([
+    'npx', 'node', 'python', 'python3', 'uvx', 'uv', 'docker', 'deno', 'bun',
+  ]);
+
+  private static validateCommand(command: string): void {
+    const trimmed = command.trim();
+    // path traversal 또는 셸 메타문자 차단
+    if (/[;&|`$(){}\\]/.test(trimmed) || trimmed.includes('..')) {
+      throw new McpInvariantViolationError(
+        `MCP server command contains forbidden characters: "${trimmed}"`,
+      );
+    }
+    // 절대경로가 아닌 경우 화이트리스트 검증
+    const basename = trimmed.split('/').pop() ?? trimmed;
+    if (!McpServer.ALLOWED_COMMANDS.has(basename)) {
+      throw new McpInvariantViolationError(
+        `MCP server command is not allowed: "${trimmed}". Allowed: ${[...McpServer.ALLOWED_COMMANDS].join(', ')}`,
+      );
+    }
+  }
+
   static create(props: CreateMcpServerProps): McpServer {
     if (!props.name.trim()) {
       throw new McpInvariantViolationError('MCP server name cannot be empty');
@@ -75,6 +97,7 @@ export class McpServer extends AggregateRoot<McpServerId> {
     if (!props.command.trim()) {
       throw new McpInvariantViolationError('MCP server command cannot be empty');
     }
+    McpServer.validateCommand(props.command);
     McpServer.validateUrlRequirement(props.transportType, props.url);
 
     const id = McpServerId.generate();

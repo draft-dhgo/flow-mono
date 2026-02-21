@@ -300,3 +300,37 @@ export interface WorkspaceFileContent {
   content: string;
   path: string;
 }
+
+// ─── Auth ───
+
+export interface LoginRequest {
+  username: string;
+  password: string;
+}
+
+export interface RegisterRequest {
+  username: string;
+  password: string;
+  displayName: string;
+}
+
+export interface AuthResponse {
+  accessToken: string;
+  refreshToken: string;
+  user: AuthUser;
+}
+
+export interface AuthUser {
+  id: string;
+  username: string;
+  displayName: string;
+}
+
+export interface RefreshTokenRequest {
+  refreshToken: string;
+}
+
+export interface RefreshTokenResponse {
+  accessToken: string;
+  refreshToken: string;
+}

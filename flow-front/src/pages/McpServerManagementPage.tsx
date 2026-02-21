@@ -278,6 +278,7 @@ export function McpServerManagementPage() {
                     className="w-1/3"
                   />
                   <Input
+                    type="password"
                     {...form.register(`env.${index}.value`)}
                     placeholder="Value"
                   />

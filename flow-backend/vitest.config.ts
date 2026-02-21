@@ -8,6 +8,7 @@ export default defineConfig({
     globals: true,
     environment: 'node',
     include: ['tests/**/*.test.ts'],
+    env: { USE_DB: 'false' },
     coverage: {
       provider: 'v8',
       reporter: ['text', 'json', 'html'],
@@ -21,6 +22,7 @@ export default defineConfig({
       '@git': path.resolve(__dirname, './src/git'),
       '@mcp': path.resolve(__dirname, './src/mcp'),
       '@agent': path.resolve(__dirname, './src/agent'),
+      '@auth': path.resolve(__dirname, './src/auth'),
       '@tests': path.resolve(__dirname, './tests'),
     },
   },

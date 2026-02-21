@@ -45,6 +45,9 @@ export const WorkflowRunId = createIdFactory<WorkflowRunId>('WorkflowRunId');
 export type WorkExecutionId = Brand<string, 'WorkExecutionId'>;
 export const WorkExecutionId = createIdFactory<WorkExecutionId>('WorkExecutionId');
 
+export type UserId = Brand<string, 'UserId'>;
+export const UserId = createIdFactory<UserId>('UserId');
+
 // ==================== Re-export Brand Utility ====================
 
 export type { Brand, IdFactory };

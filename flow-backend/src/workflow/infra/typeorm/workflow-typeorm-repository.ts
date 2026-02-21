@@ -43,6 +43,7 @@ interface WorkDefinitionJson {
   mcpServerRefs: McpServerRefJson[];
   taskDefinitions: TaskDefinitionJson[];
   pauseAfter: boolean;
+  reportFileRefs?: number[];
 }
 
 interface BranchStrategyJson {
@@ -96,6 +97,7 @@ export class WorkflowTypeormRepository extends WorkflowRepository {
             McpServerRef.fromProps(McpServerId.create(ref.mcpServerId), ref.envOverrides, ref.valid ?? true),
           ),
           wd.pauseAfter,
+          wd.reportFileRefs ?? [],
         ),
       ),
       status: row.status as WorkflowStatus,
@@ -146,6 +148,7 @@ export class WorkflowTypeormRepository extends WorkflowRepository {
             : null,
         })),
         pauseAfter: wd.pauseAfter,
+        reportFileRefs: [...wd.reportFileRefs],
       })),
       status: entity.status as string,
       version: entity.version,

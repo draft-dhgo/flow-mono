@@ -1,4 +1,6 @@
 import { Module, type DynamicModule, type Type } from '@nestjs/common';
+import { APP_GUARD } from '@nestjs/core';
+import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { createDatabaseConfig } from './common/infra/typeorm/database.config.js';
 import { SharedModule } from './common/presentation/shared.module.js';
@@ -8,6 +10,8 @@ import { McpModule } from './mcp/presentation/mcp.module.js';
 import { AgentModule } from './agent/presentation/agent.module.js';
 import { WorkflowRuntimeModule } from './workflow-runtime/presentation/workflow-runtime.module.js';
 import { McpGatewayModule } from './mcp-gateway/presentation/mcp-gateway.module.js';
+import { AuthModule } from './auth/presentation/auth.module.js';
+import { JwtAuthGuard } from './auth/presentation/guards/jwt-auth.guard.js';
 
 // TypeORM schemas
 import { WorkflowSchema } from './workflow/infra/typeorm/workflow.schema.js';
@@ -29,7 +33,9 @@ import { DomainEvents002 } from './common/infra/typeorm/migrations/002-domain-ev
 import { SchemaSync003 } from './common/infra/typeorm/migrations/003-schema-sync.js';
 
 const featureModules = [
+  ThrottlerModule.forRoot([{ ttl: 60_000, limit: 100 }]),
   SharedModule,
+  AuthModule,
   GitModule,
   McpModule,
   WorkflowModule,
@@ -65,5 +71,11 @@ if (process.env.USE_DB !== 'false') {
   imports.unshift(buildTypeOrmModule());
 }
 
-@Module({ imports })
+@Module({
+  imports,
+  providers: [
+    { provide: APP_GUARD, useClass: ThrottlerGuard },
+    { provide: APP_GUARD, useClass: JwtAuthGuard },
+  ],
+})
 export class AppModule {}

@@ -1,6 +1,6 @@
 import { Injectable, Inject } from '@nestjs/common';
 import { McpServerRepository } from '../../domain/ports/mcp-server-repository.js';
-import type { McpServerReadModel } from './read-models.js';
+import { maskEnvValues, type McpServerReadModel } from './read-models.js';
 import type { McpServerId } from '@common/ids/index.js';
 import { ApplicationError } from '@common/errors/index.js';
 
@@ -20,7 +20,7 @@ export class GetMcpServerQuery {
       name: server.name,
       command: server.command,
       args: server.args,
-      env: server.env,
+      env: maskEnvValues(server.env),
       transportType: server.transportType,
       url: server.url,
     };

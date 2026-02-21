@@ -4,6 +4,7 @@ export {
   McpServerId,
   WorkflowRunId,
   WorkExecutionId,
+  UserId,
   createIdFactory,
 } from './shared-ids.js';
 export type { Brand, IdFactory } from './shared-ids.js';

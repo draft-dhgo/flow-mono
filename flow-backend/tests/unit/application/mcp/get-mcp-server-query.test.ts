@@ -45,7 +45,7 @@ describe('GetMcpServerQuery', () => {
     expect(result.name).toBe('Test MCP');
     expect(result.command).toBe('npx');
     expect(result.args).toEqual(['-y', '@modelcontextprotocol/test']);
-    expect(result.env).toEqual({ KEY: 'value' });
+    expect(result.env).toEqual({ KEY: 'val****' });
     expect(result.transportType).toBe(McpTransportType.STDIO);
     expect(result.url).toBeNull();
     expect(mocks.mcpServerRepository.findById).toHaveBeenCalledWith(MCP_ID);

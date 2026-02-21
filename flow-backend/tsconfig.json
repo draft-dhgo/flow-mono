@@ -23,7 +23,8 @@
       "@git/*": ["src/git/*"],
       "@mcp/*": ["src/mcp/*"],
       "@agent/*": ["src/agent/*"],
-      "@mcp-gateway/*": ["src/mcp-gateway/*"]
+      "@mcp-gateway/*": ["src/mcp-gateway/*"],
+      "@auth/*": ["src/auth/*"]
     }
   },
   "include": ["src/**/*"],

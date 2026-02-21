@@ -1,5 +1,7 @@
 import { NavLink } from 'react-router-dom';
-import { LayoutDashboard, GitBranch, Server, Workflow, ListChecks } from 'lucide-react';
+import { LayoutDashboard, GitBranch, Server, Workflow, ListChecks, LogOut, User } from 'lucide-react';
+import { useAuth } from '@/hooks/useAuth';
+import { Button } from '@/components/ui/button';
 
 const navItems = [
   { to: '/', label: 'Dashboard', icon: LayoutDashboard },
@@ -10,6 +12,8 @@ const navItems = [
 ];
 
 export function Sidebar() {
+  const { user, logout } = useAuth();
+
   return (
     <aside className="w-60 border-r bg-sidebar text-sidebar-foreground flex flex-col h-screen sticky top-0">
       <div className="p-4 border-b">
@@ -34,6 +38,21 @@ export function Sidebar() {
           </NavLink>
         ))}
       </nav>
+
+      {/* 사용자 정보 + 로그아웃 */}
+      {user && (
+        <div className="border-t p-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2 min-w-0">
+              <User className="h-4 w-4 shrink-0 text-muted-foreground" />
+              <span className="text-sm font-medium truncate">{user.displayName}</span>
+            </div>
+            <Button variant="ghost" size="sm" onClick={logout} title="로그아웃" className="h-8 w-8 p-0">
+              <LogOut className="h-3.5 w-3.5" />
+            </Button>
+          </div>
+        </div>
+      )}
     </aside>
   );
 }

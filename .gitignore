@@ -1,6 +1,11 @@
 # OS
 .DS_Store
 
+# Environment files
+.env
+.env.*
+!.env.example
+
 # Node
 node_modules/
 

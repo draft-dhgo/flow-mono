@@ -1,5 +1,6 @@
 import { Controller, Post, Delete, Get, Body, Param } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
+import { Throttle } from '@nestjs/throttler';
 import { StartAgentSessionUseCase } from '../application/commands/start-agent-session-use-case.js';
 import { SendAgentQueryUseCase } from '../application/commands/send-agent-query-use-case.js';
 import { StopAgentSessionUseCase } from '../application/commands/stop-agent-session-use-case.js';
@@ -31,6 +32,7 @@ export class AgentController {
   @ApiOperation({ summary: 'Start a new agent session' })
   @ApiResponse({ status: 201, description: 'Agent session started' })
   @ApiResponse({ status: 400, description: 'Invalid input' })
+  @Throttle({ default: { ttl: 60_000, limit: 5 } })
   @Post()
   async start(@Body() dto: StartAgentSessionDto) {
     return this.startUseCase.execute({

@@ -20,4 +20,7 @@ export const queryKeys = {
   agentLogs: {
     byWorkExecution: (runId: string, weId: string) => ['agent-logs', runId, weId] as const,
   },
+  auth: {
+    me: ['auth', 'me'] as const,
+  },
 };
