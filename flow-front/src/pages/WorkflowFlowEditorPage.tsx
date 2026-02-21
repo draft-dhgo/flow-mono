@@ -77,8 +77,7 @@ const workflowFormSchema = z.object({
               reportOutline: z
                 .object({
                   sections: z
-                    .array(z.object({ title: z.string().min(1), description: z.string().min(1) }))
-                    .min(1),
+                    .array(z.object({ title: z.string().min(1), description: z.string().min(1) })),
                 })
                 .optional(),
             }),
@@ -296,7 +295,7 @@ export function WorkflowFlowEditorPage() {
 
   const onSubmit = (values: WorkflowFormValues) => {
     setValidationErrors([]);
-    // Recompute order fields
+    // Recompute order fields and strip empty reportOutline
     const normalized = {
       ...values,
       workDefinitions: values.workDefinitions.map((w, wi) => ({
@@ -305,6 +304,10 @@ export function WorkflowFlowEditorPage() {
         taskDefinitions: w.taskDefinitions.map((t, ti) => ({
           ...t,
           order: ti,
+          reportOutline:
+            t.reportOutline && t.reportOutline.sections.length > 0
+              ? t.reportOutline
+              : undefined,
         })),
       })),
     };

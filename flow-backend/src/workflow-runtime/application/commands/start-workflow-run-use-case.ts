@@ -6,10 +6,11 @@ import {
 import { FileSystem } from '../../domain/ports/file-system.js';
 import type { WorkflowId } from '@common/ids/index.js';
 import { WorkflowConfigReader, GitReader, GitService } from '@common/ports/index.js';
-import { EventPublisher } from '@common/ports/index.js';
+import { EventPublisher, UnitOfWork } from '@common/ports/index.js';
 import { ApplicationError } from '@common/errors/index.js';
 import { WorkflowRunFactory } from '../factories/workflow-run-factory.js';
 import { WorkspacePathFactory } from '../factories/workspace-path-factory.js';
+import { CompensationStack } from '@common/application/compensation-stack.js';
 
 export class WorkflowNotFoundError extends ApplicationError {
   constructor(workflowId: WorkflowId) {
@@ -65,9 +66,11 @@ export class StartWorkflowRunUseCase {
     private readonly gitReader: GitReader,
     private readonly gitService: GitService,
     private readonly workspacePathFactory: WorkspacePathFactory,
+    private readonly unitOfWork: UnitOfWork,
   ) {}
 
   async execute(command: StartWorkflowRunCommand): Promise<StartWorkflowRunResult> {
+    // TRY: Validate inputs
     const workflow = await this.workflowConfigReader.findById(command.workflowId);
     if (!workflow) {
       throw new WorkflowNotFoundError(command.workflowId);
@@ -77,42 +80,43 @@ export class StartWorkflowRunUseCase {
       throw new WorkflowNotActiveError(command.workflowId);
     }
 
-    try {
-      const trimmedKey = command.issueKey.trim();
-      if (!/^[A-Z][A-Z0-9]+-\d+$/.test(trimmedKey)) {
-        throw new InvalidIssueKeyError(command.issueKey);
-      }
+    const trimmedKey = command.issueKey.trim();
+    if (!/^[A-Z][A-Z0-9]+-\d+$/.test(trimmedKey)) {
+      throw new InvalidIssueKeyError(command.issueKey);
+    }
 
-      if (workflow.seedKeys.length > 0) {
-        const provided = command.seedValues ?? {};
-        const missingKeys = [...workflow.seedKeys].filter(
-          (key) => !(key in provided) || provided[key] === '',
-        );
-        if (missingKeys.length > 0) {
-          throw new MissingSeedValuesError(missingKeys);
-        }
-      }
-
-      const { run } = this.workflowRunFactory.build(workflow, trimmedKey, command.seedValues ?? {});
-      run.start();
-
-      // 브랜치 전략 템플릿에서 실제 브랜치명 생성
-      const resolvedBranchName = workflow.branchStrategy.replace(
-        '{issueKey}',
-        command.issueKey,
+    if (workflow.seedKeys.length > 0) {
+      const provided = command.seedValues ?? {};
+      const missingKeys = [...workflow.seedKeys].filter(
+        (key) => !(key in provided) || provided[key] === '',
       );
+      if (missingKeys.length > 0) {
+        throw new MissingSeedValuesError(missingKeys);
+      }
+    }
 
-      // WorkflowSpace 생성
-      const workflowSpacePath = this.workspacePathFactory.workflowSpacePath(run.id);
-      await this.fileSystem.createDirectory(workflowSpacePath);
+    // TRY: Create domain entities in memory
+    const { run } = this.workflowRunFactory.build(workflow, trimmedKey, command.seedValues ?? {});
+    const resolvedBranchName = workflow.branchStrategy.replace('{issueKey}', command.issueKey);
+    const workflowSpacePath = this.workspacePathFactory.workflowSpacePath(run.id);
+    const workflowSpace = WorkflowSpace.create({ workflowRunId: run.id, path: workflowSpacePath });
 
-      const workflowSpace = WorkflowSpace.create({
-        workflowRunId: run.id,
-        path: workflowSpacePath,
-      });
+    // TRY: Reserve entities in DB (INITIALIZED state)
+    await this.unitOfWork.run(async () => {
+      await this.workflowRunRepository.save(run);
       await this.workflowSpaceRepository.save(workflowSpace);
+    });
 
-      // WorkTree 생성 (git ref pool의 각 항목에 대해)
+    // CONFIRM: Execute side effects with compensation
+    const compensations = new CompensationStack();
+
+    try {
+      await this.fileSystem.createDirectory(workflowSpacePath);
+      compensations.push(async () => {
+        try { await this.fileSystem.deleteDirectory(workflowSpacePath); } catch { /* best-effort */ }
+      });
+
+      // WorkTree creation (git ref pool)
       const gitIds = run.gitRefPool.map((ref) => ref.gitId);
       if (gitIds.length > 0) {
         const gitInfos = await this.gitReader.findByIds(gitIds);
@@ -122,14 +126,13 @@ export class StartWorkflowRunUseCase {
 
           const workTreePath = this.workspacePathFactory.workTreePath(run.id, gitRef.gitId);
 
-          // 원격 정보 최신화 및 기존 브랜치 충돌 처리
           await this.gitService.fetch(gitInfo.localPath);
           const exists = await this.gitService.branchExists(gitInfo.localPath, resolvedBranchName);
           if (exists) {
             try {
               await this.gitService.removeWorktreeForBranch(gitInfo.localPath, resolvedBranchName);
             } catch {
-              // 기존 worktree가 없으면 무시
+              // existing worktree may not exist
             }
             await this.gitService.deleteBranch(gitInfo.localPath, resolvedBranchName);
           }
@@ -140,10 +143,13 @@ export class StartWorkflowRunUseCase {
             baseBranch: gitRef.baseBranch,
             newBranchName: resolvedBranchName,
           });
+          compensations.push(async () => {
+            try {
+              await this.gitService.removeWorktreeForBranch(gitInfo.localPath, resolvedBranchName);
+            } catch { /* best-effort */ }
+          });
 
-          // 에이전트의 원격 푸시 차단
           await this.gitService.installPrePushHook(workTreePath);
-          // upstream 트래킹 해제 — 새 브랜치가 원격 베이스를 추적하지 않도록
           await this.gitService.unsetUpstream(workTreePath, resolvedBranchName);
 
           const workTree = WorkTree.create({
@@ -156,16 +162,29 @@ export class StartWorkflowRunUseCase {
         }
       }
 
-      await this.workflowRunRepository.save(run);
+      // Transition to RUNNING
+      run.start();
 
-      const allEvents = run.clearDomainEvents();
-      await this.eventPublisher.publishAll(allEvents);
+      await this.unitOfWork.run(async () => {
+        await this.workflowRunRepository.save(run);
+        await this.eventPublisher.publishAll(run.clearDomainEvents());
+      });
 
       return {
         workflowRunId: run.id,
         status: run.status,
       };
     } catch (error) {
+      // CANCEL: Compensate side effects
+      await compensations.runAll();
+
+      try {
+        run.cancel('Start failed: ' + (error instanceof Error ? error.message : String(error)));
+        await this.workflowRunRepository.save(run);
+      } catch {
+        // best-effort cancel save
+      }
+
       if (error instanceof ApplicationError) throw error;
       throw new WorkflowRunStartFailedError(
         error instanceof Error ? error.message : String(error),

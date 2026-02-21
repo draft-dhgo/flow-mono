@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { WorkflowPipelineService } from '@common/ports/index.js';
 import { EventPublisher } from '@common/ports/index.js';
 import { ApplicationError } from '@common/errors/application-error.js';
+import { DomainError } from '@common/errors/domain-error.js';
 import type { WorkflowRunId } from '@common/ids/index.js';
 import {
   WorkflowRunRepository, WorkExecutionRepository, WorkflowRunStatus,
@@ -110,6 +111,9 @@ export class WorkflowPipelineServiceImpl extends WorkflowPipelineService {
   }
 
   private isRetryable(err: unknown): boolean {
+    if (err instanceof DomainError && err.isTransient) {
+      return true;
+    }
     if (err instanceof ApplicationError && err.code.includes('NOT_FOUND')) {
       return false;
     }

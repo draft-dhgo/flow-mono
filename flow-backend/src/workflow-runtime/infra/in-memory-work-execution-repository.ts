@@ -1,9 +1,21 @@
 import type { WorkExecution } from '../domain/entities/work-execution.js';
 import type { WorkExecutionId, WorkflowRunId } from '../domain/value-objects/index.js';
 import { WorkExecutionRepository } from '../domain/ports/work-execution-repository.js';
+import type { InMemorySnapshotRegistry } from '@common/infra/in-memory-unit-of-work.js';
 
-export class InMemoryWorkExecutionRepository extends WorkExecutionRepository {
+export class InMemoryWorkExecutionRepository extends WorkExecutionRepository implements InMemorySnapshotRegistry {
   private readonly store = new Map<WorkExecutionId, WorkExecution>();
+
+  snapshot(): Map<unknown, unknown> {
+    return new Map(this.store);
+  }
+
+  restore(snap: Map<unknown, unknown>): void {
+    this.store.clear();
+    for (const [k, v] of snap) {
+      this.store.set(k as WorkExecutionId, v as WorkExecution);
+    }
+  }
 
   async findById(id: WorkExecutionId): Promise<WorkExecution | null> {
     return this.store.get(id) ?? null;

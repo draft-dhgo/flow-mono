@@ -4,6 +4,7 @@ import { WorkTree } from '../../domain/entities/work-tree.js';
 import type { WorkTreeRow } from './work-tree.schema.js';
 import { WorkTreeId, WorkflowRunId } from '../../domain/value-objects/index.js';
 import { GitId } from '@common/ids/index.js';
+import { OptimisticLockError } from '@common/errors/index.js';
 
 export class WorkTreeTypeormRepository extends WorkTreeRepository {
   constructor(private readonly repo: Repository<WorkTreeRow>) {
@@ -46,7 +47,22 @@ export class WorkTreeTypeormRepository extends WorkTreeRepository {
 
   async save(workTree: WorkTree): Promise<void> {
     const row = this.toRow(workTree);
-    await this.repo.save(row);
+    if (workTree.version > 1) {
+      const result = await this.repo
+        .createQueryBuilder()
+        .update()
+        .set(row)
+        .where('id = :id AND version = :version', {
+          id: row.id,
+          version: workTree.version - 1,
+        })
+        .execute();
+      if (result.affected === 0) {
+        throw new OptimisticLockError('WorkTree', row.id);
+      }
+    } else {
+      await this.repo.save(row);
+    }
   }
 
   async delete(id: WorkTreeId): Promise<void> {

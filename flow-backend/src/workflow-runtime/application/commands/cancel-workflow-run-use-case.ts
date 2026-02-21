@@ -4,7 +4,7 @@ import {
 } from '../../domain/index.js';
 import type { WorkflowRunId } from '../../domain/index.js';
 import { AgentService } from '@common/ports/index.js';
-import { EventPublisher } from '@common/ports/index.js';
+import { EventPublisher, UnitOfWork } from '@common/ports/index.js';
 import { ApplicationError } from '@common/errors/index.js';
 
 export class WorkflowRunNotFoundError extends ApplicationError {
@@ -33,9 +33,11 @@ export class CancelWorkflowRunUseCase {
     private readonly workExecutionRepository: WorkExecutionRepository,
     private readonly agentService: AgentService,
     private readonly eventPublisher: EventPublisher,
+    private readonly unitOfWork: UnitOfWork,
   ) {}
 
   async execute(command: CancelWorkflowRunCommand): Promise<void> {
+    // TRY: Load and validate
     const run = await this.workflowRunRepository.findById(command.workflowRunId);
     if (!run) {
       throw new WorkflowRunNotFoundError(command.workflowRunId);
@@ -45,6 +47,7 @@ export class CancelWorkflowRunUseCase {
       throw new WorkflowRunCannotCancelError(command.workflowRunId);
     }
 
+    // CONFIRM: Side effects (best-effort) + state transitions + TX save
     const workExecutions = await this.workExecutionRepository.findByWorkflowRunId(run.id);
     for (const we of workExecutions) {
       if (!we.isTerminal) {
@@ -58,13 +61,15 @@ export class CancelWorkflowRunUseCase {
 
     run.cancel(command.reason);
 
-    await this.workExecutionRepository.saveAll(workExecutions);
-    await this.workflowRunRepository.save(run);
+    await this.unitOfWork.run(async () => {
+      await this.workExecutionRepository.saveAll(workExecutions);
+      await this.workflowRunRepository.save(run);
 
-    const allEvents = [
-      ...run.clearDomainEvents(),
-      ...workExecutions.flatMap((we) => we.clearDomainEvents()),
-    ];
-    await this.eventPublisher.publishAll(allEvents);
+      const allEvents = [
+        ...run.clearDomainEvents(),
+        ...workExecutions.flatMap((we) => we.clearDomainEvents()),
+      ];
+      await this.eventPublisher.publishAll(allEvents);
+    });
   }
 }

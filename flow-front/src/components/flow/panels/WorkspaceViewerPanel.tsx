@@ -1,8 +1,6 @@
 import { useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
 import Editor from '@monaco-editor/react';
-import { workflowRunsApi } from '@/api/workflow-runs';
-import { queryKeys } from '@/lib/query-keys';
+import { useWorkflowRunWorkspace } from '@/hooks/useWorkflowRuns';
 import { LoadingSpinner } from '@/components/LoadingSpinner';
 import { Button } from '@/components/ui/button';
 import { File, Folder, FolderOpen, X } from 'lucide-react';
@@ -140,18 +138,7 @@ interface WorkspaceViewerPanelProps {
 }
 
 export function WorkspaceViewerPanel({ runId, onClose }: WorkspaceViewerPanelProps) {
-  const [selectedFilePath, setSelectedFilePath] = useState<string | null>(null);
-
-  const treeQuery = useQuery({
-    queryKey: queryKeys.workflowRuns.workspaceTree(runId),
-    queryFn: () => workflowRunsApi.getWorkspaceTree(runId),
-  });
-
-  const fileContentQuery = useQuery({
-    queryKey: queryKeys.workflowRuns.workspaceFile(runId, selectedFilePath ?? ''),
-    queryFn: () => workflowRunsApi.getWorkspaceFile(runId, selectedFilePath!),
-    enabled: selectedFilePath !== null,
-  });
+  const { treeQuery, fileContentQuery, selectedFilePath, setSelectedFilePath } = useWorkflowRunWorkspace(runId);
 
   const treeNodes = treeQuery.data ? buildTree(treeQuery.data) : [];
 

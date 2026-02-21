@@ -55,6 +55,13 @@ export function useWorkflows() {
     },
   });
 
+  const bulkDeleteMutation = useMutation({
+    mutationFn: (ids: string[]) => Promise.all(ids.map((id) => workflowsApi.delete(id))),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.workflows.all });
+    },
+  });
+
   return {
     listQuery,
     createMutation,
@@ -63,6 +70,7 @@ export function useWorkflows() {
     activateMutation,
     deactivateMutation,
     startRunMutation,
+    bulkDeleteMutation,
   };
 }
 

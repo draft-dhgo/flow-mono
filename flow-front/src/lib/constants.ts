@@ -38,6 +38,20 @@ export const WORKSPACE_STATUS_LABEL: Record<WorkspaceStatus, string> = {
   COMPLETED: '완료',
 };
 
+export const SUMMARY_CARD_COLOR: Record<string, string> = {
+  running: 'text-green-600',
+  paused: 'text-yellow-600',
+  awaiting: 'text-orange-600',
+  completed: 'text-blue-600',
+  cancelled: 'text-red-600',
+};
+
+export const MCP_TRANSPORT_COLOR: Record<string, string> = {
+  STDIO: 'bg-gray-100 text-gray-800',
+  SSE: 'bg-blue-100 text-blue-800',
+  STREAMABLE_HTTP: 'bg-purple-100 text-purple-800',
+};
+
 export const MODEL_OPTIONS = [
   { value: 'claude-opus-4-6', label: 'Claude Opus 4.6' },
   { value: 'claude-sonnet-4-5-20250929', label: 'Claude Sonnet 4.5' },

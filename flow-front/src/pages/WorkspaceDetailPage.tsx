@@ -1,7 +1,6 @@
 import { useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import Editor from '@monaco-editor/react';
-import { useQuery } from '@tanstack/react-query';
 import { PageHeader } from '@/components/layout/PageHeader';
 import { StatusBadge } from '@/components/StatusBadge';
 import { ConfirmDialog } from '@/components/ConfirmDialog';
@@ -10,9 +9,7 @@ import { Button } from '@/components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { ChatPanel } from '@/components/workspace/ChatPanel';
 import { DiffViewerPanel } from '@/components/workspace/DiffViewerPanel';
-import { useWorkspaceDetail } from '@/hooks/useWorkspaces';
-import { workspacesApi } from '@/api/workspaces';
-import { queryKeys } from '@/lib/query-keys';
+import { useWorkspaceDetail, useWorkspaceFile } from '@/hooks/useWorkspaces';
 import type { FileTreeEntry } from '@/api/types';
 import { PushResultDialog } from '@/components/PushResultDialog';
 import { File, Folder, FolderOpen, Trash2, CheckCircle, Eye, GitCompare, Upload } from 'lucide-react';
@@ -130,11 +127,7 @@ export function WorkspaceDetailPage() {
   const [pushConfirmOpen, setPushConfirmOpen] = useState(false);
   const [pushResultOpen, setPushResultOpen] = useState(false);
 
-  const fileContentQuery = useQuery({
-    queryKey: queryKeys.workspaces.file(id!, selectedFile ?? ''),
-    queryFn: () => workspacesApi.file(id!, selectedFile!),
-    enabled: !!id && !!selectedFile,
-  });
+  const fileContentQuery = useWorkspaceFile(id, selectedFile ?? '');
 
   const workspace = detailQuery.data;
 

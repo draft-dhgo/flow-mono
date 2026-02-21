@@ -1,4 +1,4 @@
-import apiClient from './client';
+import { apiClient } from './client';
 import type { GitResponse, CreateGitRequest } from './types';
 
 export const gitsApi = {

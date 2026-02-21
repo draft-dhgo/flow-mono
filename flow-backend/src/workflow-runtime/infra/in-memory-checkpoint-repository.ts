@@ -1,9 +1,21 @@
 import type { Checkpoint } from '../domain/entities/checkpoint.js';
 import type { CheckpointId, WorkflowRunId } from '../domain/value-objects/index.js';
 import { CheckpointRepository } from '../domain/ports/checkpoint-repository.js';
+import type { InMemorySnapshotRegistry } from '@common/infra/in-memory-unit-of-work.js';
 
-export class InMemoryCheckpointRepository extends CheckpointRepository {
+export class InMemoryCheckpointRepository extends CheckpointRepository implements InMemorySnapshotRegistry {
   private readonly store = new Map<CheckpointId, Checkpoint>();
+
+  snapshot(): Map<unknown, unknown> {
+    return new Map(this.store);
+  }
+
+  restore(snap: Map<unknown, unknown>): void {
+    this.store.clear();
+    for (const [k, v] of snap) {
+      this.store.set(k as CheckpointId, v as Checkpoint);
+    }
+  }
 
   async findById(id: CheckpointId): Promise<Checkpoint | null> {
     return this.store.get(id) ?? null;

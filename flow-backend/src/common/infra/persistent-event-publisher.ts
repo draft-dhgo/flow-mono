@@ -30,6 +30,7 @@ function toRow(event: DomainEvent): Partial<DomainEventRow> {
   };
 }
 
+/** @deprecated Use TransactionalEventPublisher instead */
 export class PersistentEventPublisher extends EventPublisher {
   private readonly logger = new Logger(PersistentEventPublisher.name);
   private readonly inner = new InMemoryEventPublisher();

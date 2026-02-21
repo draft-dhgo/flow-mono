@@ -66,7 +66,8 @@ function createMocks() {
     copy: vi.fn(),
     move: vi.fn(),
   };
-  return { workExecutionRepository, reportRepository, agentService, eventPublisher, fileSystem };
+  const unitOfWork = { run: async <T>(work: () => Promise<T>) => work() };
+  return { workExecutionRepository, reportRepository, agentService, eventPublisher, fileSystem, unitOfWork };
 }
 
 function createUseCase(mocks: ReturnType<typeof createMocks>) {
@@ -76,6 +77,7 @@ function createUseCase(mocks: ReturnType<typeof createMocks>) {
     mocks.agentService as never,
     mocks.eventPublisher as never,
     mocks.fileSystem as never,
+    mocks.unitOfWork as never,
   );
 }
 

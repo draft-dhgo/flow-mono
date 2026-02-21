@@ -1,6 +1,8 @@
 import { Module, Inject, Logger, type OnModuleInit } from '@nestjs/common';
-import { EventPublisher, WorkflowPipelineService, WorkflowRuntimeFacade } from '@common/ports/index.js';
+import { EventPublisher, UnitOfWork, WorkflowPipelineService, WorkflowRuntimeFacade } from '@common/ports/index.js';
+import { InMemoryUnitOfWork, type InMemorySnapshotRegistry } from '@common/infra/in-memory-unit-of-work.js';
 import type { WorkflowRunId } from '@common/ids/index.js';
+import { WorkflowRunRepository } from '../domain/ports/workflow-run-repository.js';
 import { WorkExecutionRepository } from '../domain/ports/work-execution-repository.js';
 import { ReportRepository } from '../domain/ports/report-repository.js';
 import { CheckpointRepository } from '../domain/ports/checkpoint-repository.js';
@@ -133,12 +135,36 @@ export class WorkflowRuntimeModule implements OnModuleInit {
 
   constructor(
     @Inject(EventPublisher) private readonly eventPublisher: EventPublisher,
+    @Inject(UnitOfWork) private readonly unitOfWork: UnitOfWork,
     private readonly pipelineService: WorkflowPipelineService,
     private readonly workflowDeletedHandler: WorkflowDeletedHandler,
     private readonly recoverOrphanedRunsUseCase: RecoverOrphanedRunsUseCase,
+    @Inject(WorkflowRunRepository) private readonly workflowRunRepo: WorkflowRunRepository,
+    @Inject(WorkExecutionRepository) private readonly workExecutionRepo: WorkExecutionRepository,
+    @Inject(ReportRepository) private readonly reportRepo: ReportRepository,
+    @Inject(CheckpointRepository) private readonly checkpointRepo: CheckpointRepository,
+    @Inject(WorkTreeRepository) private readonly workTreeRepo: WorkTreeRepository,
+    @Inject(WorkflowSpaceRepository) private readonly workflowSpaceRepo: WorkflowSpaceRepository,
   ) {}
 
   onModuleInit(): void {
+    // Register InMemory repositories as snapshot targets for transactional rollback
+    if (this.unitOfWork instanceof InMemoryUnitOfWork) {
+      const repos = [
+        this.workflowRunRepo,
+        this.workExecutionRepo,
+        this.reportRepo,
+        this.checkpointRepo,
+        this.workTreeRepo,
+        this.workflowSpaceRepo,
+      ];
+      for (const repo of repos) {
+        if ('snapshot' in repo && 'restore' in repo) {
+          this.unitOfWork.registerTarget(repo as unknown as InMemorySnapshotRegistry);
+        }
+      }
+    }
+
     this.eventPublisher.subscribe(WorkflowRunStarted.EVENT_TYPE, async (event) => {
       void this.pipelineService.runPipeline(
         (event as WorkflowRunStarted).payload.workflowRunId as WorkflowRunId,

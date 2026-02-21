@@ -103,7 +103,8 @@ function createMocks() {
     subscribe: vi.fn(),
     unsubscribe: vi.fn(),
   };
-  return { workflowRunRepository, workExecutionRepository, checkpointRepository, workTreeRepository, workflowSpaceRepository, reportRepository, fileSystem, gitService, eventPublisher };
+  const unitOfWork = { run: async <T>(work: () => Promise<T>) => work() };
+  return { workflowRunRepository, workExecutionRepository, checkpointRepository, workTreeRepository, workflowSpaceRepository, reportRepository, fileSystem, gitService, eventPublisher, unitOfWork };
 }
 
 function createUseCase(mocks: ReturnType<typeof createMocks>) {
@@ -117,6 +118,7 @@ function createUseCase(mocks: ReturnType<typeof createMocks>) {
     mocks.fileSystem as never,
     mocks.gitService as never,
     mocks.eventPublisher as never,
+    mocks.unitOfWork as never,
   );
 }
 

@@ -5,6 +5,7 @@ import { TaskExecution } from '../../domain/entities/task-execution.js';
 import type { WorkExecutionRow } from './work-execution.schema.js';
 import { WorkExecutionId, WorkflowRunId, WorkNodeConfigId, TaskExecutionId, ReportId } from '../../domain/value-objects/index.js';
 import { WorkflowId } from '@common/ids/index.js';
+import { OptimisticLockError } from '@common/errors/index.js';
 
 interface TaskExecutionJson {
   id: string;
@@ -94,12 +95,28 @@ export class WorkExecutionTypeormRepository extends WorkExecutionRepository {
 
   async save(workExecution: WorkExecution): Promise<void> {
     const row = this.toRow(workExecution);
-    await this.repo.save(row);
+    if (workExecution.version > 1) {
+      const result = await this.repo
+        .createQueryBuilder()
+        .update()
+        .set(row as unknown as Record<string, unknown>)
+        .where('id = :id AND version = :version', {
+          id: row.id,
+          version: workExecution.version - 1,
+        })
+        .execute();
+      if (result.affected === 0) {
+        throw new OptimisticLockError('WorkExecution', row.id);
+      }
+    } else {
+      await this.repo.save(row);
+    }
   }
 
   async saveAll(workExecutions: WorkExecution[]): Promise<void> {
-    const rows = workExecutions.map((we) => this.toRow(we));
-    await this.repo.save(rows);
+    for (const we of workExecutions) {
+      await this.save(we);
+    }
   }
 
   async delete(id: WorkExecutionId): Promise<void> {

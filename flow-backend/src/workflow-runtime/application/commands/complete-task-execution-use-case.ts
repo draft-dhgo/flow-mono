@@ -5,9 +5,10 @@ import {
   CheckpointRepository, WorkTreeRepository,
 } from '../../domain/index.js';
 import type { WorkExecutionId, CommitHash } from '../../domain/index.js';
+import type { DomainEvent } from '@common/events/domain-event.js';
 import type { GitId } from '@common/ids/index.js';
 import { GitService } from '@common/ports/index.js';
-import { EventPublisher } from '@common/ports/index.js';
+import { EventPublisher, UnitOfWork } from '@common/ports/index.js';
 import { ApplicationError } from '@common/errors/index.js';
 
 export class WorkExecutionNotFoundError extends ApplicationError {
@@ -47,9 +48,11 @@ export class CompleteTaskExecutionUseCase {
     private readonly workTreeRepository: WorkTreeRepository,
     private readonly gitService: GitService,
     private readonly eventPublisher: EventPublisher,
+    private readonly unitOfWork: UnitOfWork,
   ) {}
 
   async execute(command: CompleteTaskExecutionCommand): Promise<CompleteTaskExecutionResult> {
+    // TRY: Load, validate, and prepare domain state
     const workExecution = await this.workExecutionRepository.findById(command.workExecutionId);
     if (!workExecution) {
       throw new WorkExecutionNotFoundError(command.workExecutionId);
@@ -68,9 +71,12 @@ export class CompleteTaskExecutionUseCase {
     const hasNextTask = workExecution.advanceToNextTask();
     const isWorkComplete = workExecution.isCompleted;
 
+    let checkpoint: Checkpoint | null = null;
+
     if (isWorkComplete) {
       const run = await this.workflowRunRepository.findById(workExecution.workflowRunId);
       if (run) {
+        // Read-only side effect: collect commit hashes
         const workTrees = await this.workTreeRepository.findByWorkflowRunId(run.id);
         const commitHashes = new Map<GitId, CommitHash>();
         for (const wt of workTrees) {
@@ -83,17 +89,13 @@ export class CompleteTaskExecutionUseCase {
         }
 
         if (commitHashes.size > 0) {
-          const checkpoint = Checkpoint.create({
+          checkpoint = Checkpoint.create({
             workflowRunId: run.id,
             workflowId: workExecution.workflowId,
             workExecutionId: workExecution.id,
             workSequence: workExecution.sequence,
             commitHashes,
           });
-          await this.checkpointRepository.save(checkpoint);
-
-          const checkpointEvents = checkpoint.clearDomainEvents();
-          await this.eventPublisher.publishAll(checkpointEvents);
         }
 
         const hasMore = run.advanceWork();
@@ -103,22 +105,33 @@ export class CompleteTaskExecutionUseCase {
             run.await();
           }
         }
-        await this.workflowRunRepository.save(run);
 
-        const runEvents = run.clearDomainEvents();
-        await this.eventPublisher.publishAll(runEvents);
+        // CONFIRM: Single TX for all saves + events
+        await this.unitOfWork.run(async () => {
+          if (checkpoint) {
+            await this.checkpointRepository.save(checkpoint);
+          }
+          await this.workflowRunRepository.save(run);
+          await this.workExecutionRepository.save(workExecution);
+
+          const allEvents: DomainEvent[] = [
+            ...(checkpoint ? checkpoint.clearDomainEvents() : []),
+            ...run.clearDomainEvents(),
+            ...workExecution.clearDomainEvents(),
+          ];
+          await this.eventPublisher.publishAll(allEvents);
+        });
+
+        return { taskExecutionId, hasNextTask, isWorkComplete };
       }
     }
 
-    await this.workExecutionRepository.save(workExecution);
+    // CONFIRM: Simple case (no work complete or no run)
+    await this.unitOfWork.run(async () => {
+      await this.workExecutionRepository.save(workExecution);
+      await this.eventPublisher.publishAll(workExecution.clearDomainEvents());
+    });
 
-    const weEvents = workExecution.clearDomainEvents();
-    await this.eventPublisher.publishAll(weEvents);
-
-    return {
-      taskExecutionId,
-      hasNextTask,
-      isWorkComplete,
-    };
+    return { taskExecutionId, hasNextTask, isWorkComplete };
   }
 }

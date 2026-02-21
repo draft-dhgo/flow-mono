@@ -5,6 +5,7 @@ import { WorkSpace } from '../../domain/entities/work-space.js';
 import type { WorkflowSpaceRow } from './workflow-space.schema.js';
 import { WorkflowSpaceId, WorkflowRunId, WorkSpaceId, WorkExecutionId } from '../../domain/value-objects/index.js';
 import { SymLink, LinkType } from '../../domain/value-objects/index.js';
+import { OptimisticLockError } from '@common/errors/index.js';
 
 interface SymLinkJson {
   type: string;
@@ -79,7 +80,22 @@ export class WorkflowSpaceTypeormRepository extends WorkflowSpaceRepository {
 
   async save(workflowSpace: WorkflowSpace): Promise<void> {
     const row = this.toRow(workflowSpace);
-    await this.repo.save(row);
+    if (workflowSpace.version > 1) {
+      const result = await this.repo
+        .createQueryBuilder()
+        .update()
+        .set(row as unknown as Record<string, unknown>)
+        .where('id = :id AND version = :version', {
+          id: row.id,
+          version: workflowSpace.version - 1,
+        })
+        .execute();
+      if (result.affected === 0) {
+        throw new OptimisticLockError('WorkflowSpace', row.id);
+      }
+    } else {
+      await this.repo.save(row);
+    }
   }
 
   async delete(id: WorkflowSpaceId): Promise<void> {

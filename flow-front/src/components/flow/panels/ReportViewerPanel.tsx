@@ -1,6 +1,5 @@
 import ReactMarkdown from 'react-markdown';
-import { useQuery } from '@tanstack/react-query';
-import { reportsApi } from '@/api/workflow-runs';
+import { useReport } from '@/hooks/useWorkflowRuns';
 import { LoadingSpinner } from '@/components/LoadingSpinner';
 import { FileText } from 'lucide-react';
 
@@ -10,18 +9,7 @@ interface ReportViewerPanelProps {
 }
 
 export function ReportViewerPanel({ workExecutionId, isRunning }: ReportViewerPanelProps) {
-  const reportQuery = useQuery({
-    queryKey: ['reports', workExecutionId],
-    queryFn: () => reportsApi.get(workExecutionId),
-    enabled: !!workExecutionId,
-    refetchInterval: isRunning ? 5000 : false,
-    retry: (failureCount, error) => {
-      if (error && typeof error === 'object' && 'status' in error && (error as { status: number }).status === 404) {
-        return false;
-      }
-      return failureCount < 3;
-    },
-  });
+  const reportQuery = useReport(workExecutionId, isRunning ?? false);
 
   return (
     <div className="p-4 space-y-3">

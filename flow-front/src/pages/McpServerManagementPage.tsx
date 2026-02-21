@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { useForm, useFieldArray } from 'react-hook-form';
+import { useForm, useFieldArray, useWatch } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
 import { PageHeader } from '@/components/layout/PageHeader';
@@ -27,6 +27,7 @@ import {
 import { useMcpServers } from '@/hooks/useMcpServers';
 import { useWorkflows } from '@/hooks/useWorkflows';
 import type { McpServerResponse, McpTransportType, ApiError } from '@/api/types';
+import { MCP_TRANSPORT_COLOR } from '@/lib/constants';
 import { Plus, MoreHorizontal, Trash2, X } from 'lucide-react';
 
 const mcpServerFormSchema = z
@@ -70,7 +71,7 @@ export function McpServerManagementPage() {
 
   const argsFieldArray = useFieldArray({ control: form.control, name: 'args' });
   const envFieldArray = useFieldArray({ control: form.control, name: 'env' });
-  const transportType = form.watch('transportType');
+  const transportType = useWatch({ control: form.control, name: 'transportType' });
 
   const onRegister = (values: McpFormValues) => {
     const data = {
@@ -119,18 +120,12 @@ export function McpServerManagementPage() {
     );
   };
 
-  const transportColor: Record<string, string> = {
-    STDIO: 'bg-gray-100 text-gray-800',
-    SSE: 'bg-blue-100 text-blue-800',
-    STREAMABLE_HTTP: 'bg-purple-100 text-purple-800',
-  };
-
   const columns: Column<McpServerResponse>[] = [
     { header: 'Name', accessor: 'name' },
     {
       header: 'Transport',
       accessor: (row) => (
-        <Badge variant="secondary" className={transportColor[row.transportType]}>
+        <Badge variant="secondary" className={MCP_TRANSPORT_COLOR[row.transportType]}>
           {row.transportType}
         </Badge>
       ),

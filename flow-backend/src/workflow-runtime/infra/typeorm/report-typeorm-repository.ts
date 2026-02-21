@@ -4,6 +4,7 @@ import { Report } from '../../domain/entities/report.js';
 import type { ReportRow } from './report.schema.js';
 import { ReportId, TaskExecutionId, WorkExecutionId, WorkflowRunId, ReportStatus } from '../../domain/value-objects/index.js';
 import { ReportOutline } from '@common/value-objects/index.js';
+import { OptimisticLockError } from '@common/errors/index.js';
 import { Section } from '@common/value-objects/index.js';
 
 interface SectionJson {
@@ -73,7 +74,22 @@ export class ReportTypeormRepository extends ReportRepository {
 
   async save(report: Report): Promise<void> {
     const row = this.toRow(report);
-    await this.repo.save(row);
+    if (report.version > 1) {
+      const result = await this.repo
+        .createQueryBuilder()
+        .update()
+        .set(row as unknown as Record<string, unknown>)
+        .where('id = :id AND version = :version', {
+          id: row.id,
+          version: report.version - 1,
+        })
+        .execute();
+      if (result.affected === 0) {
+        throw new OptimisticLockError('Report', row.id);
+      }
+    } else {
+      await this.repo.save(row);
+    }
   }
 
   async delete(id: ReportId): Promise<void> {

@@ -91,11 +91,12 @@ function createMocks() {
     merge: vi.fn(),
   };
   const workspacePathFactory = new WorkspacePathFactory('/tmp/test-spaces');
+  const unitOfWork = { run: async <T>(work: () => Promise<T>) => work() };
   return {
     workflowConfigReader, workflowRunFactory,
     workflowRunRepository, eventPublisher,
     workflowSpaceRepository, workTreeRepository,
-    fileSystem, gitReader, gitService, workspacePathFactory,
+    fileSystem, gitReader, gitService, workspacePathFactory, unitOfWork,
   };
 }
 
@@ -111,6 +112,7 @@ function createUseCase(mocks: ReturnType<typeof createMocks>) {
     mocks.gitReader as never,
     mocks.gitService as never,
     mocks.workspacePathFactory,
+    mocks.unitOfWork as never,
   );
 }
 
@@ -160,7 +162,7 @@ describe('StartWorkflowRunUseCase', () => {
 
     expect(result.workflowRunId).toBeDefined();
     expect(result.status).toBe(WorkflowRunStatus.RUNNING);
-    expect(mocks.workflowRunRepository.save).toHaveBeenCalledOnce();
+    expect(mocks.workflowRunRepository.save).toHaveBeenCalledTimes(2);
     expect(mocks.eventPublisher.publishAll).toHaveBeenCalledOnce();
   });
 

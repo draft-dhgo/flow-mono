@@ -5,6 +5,7 @@ import type { CheckpointRow } from './checkpoint.schema.js';
 import { CheckpointId, WorkflowRunId, WorkExecutionId } from '../../domain/value-objects/index.js';
 import { CommitHash } from '../../domain/value-objects/index.js';
 import { WorkflowId, GitId } from '@common/ids/index.js';
+import { OptimisticLockError } from '@common/errors/index.js';
 
 export class CheckpointTypeormRepository extends CheckpointRepository {
   constructor(private readonly repo: Repository<CheckpointRow>) {
@@ -62,7 +63,22 @@ export class CheckpointTypeormRepository extends CheckpointRepository {
 
   async save(checkpoint: Checkpoint): Promise<void> {
     const row = this.toRow(checkpoint);
-    await this.repo.save(row);
+    if (checkpoint.version > 1) {
+      const result = await this.repo
+        .createQueryBuilder()
+        .update()
+        .set(row as unknown as Record<string, unknown>)
+        .where('id = :id AND version = :version', {
+          id: row.id,
+          version: checkpoint.version - 1,
+        })
+        .execute();
+      if (result.affected === 0) {
+        throw new OptimisticLockError('Checkpoint', row.id);
+      }
+    } else {
+      await this.repo.save(row);
+    }
   }
 
   async delete(id: CheckpointId): Promise<void> {

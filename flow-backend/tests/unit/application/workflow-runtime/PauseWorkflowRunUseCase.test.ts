@@ -44,7 +44,8 @@ function createMocks() {
     subscribe: vi.fn(),
     unsubscribe: vi.fn(),
   };
-  return { workflowRunRepository, agentService, eventPublisher };
+  const unitOfWork = { run: async <T>(work: () => Promise<T>) => work() };
+  return { workflowRunRepository, agentService, eventPublisher, unitOfWork };
 }
 
 function createUseCase(mocks: ReturnType<typeof createMocks>) {
@@ -52,6 +53,7 @@ function createUseCase(mocks: ReturnType<typeof createMocks>) {
     mocks.workflowRunRepository as never,
     mocks.agentService as never,
     mocks.eventPublisher as never,
+    mocks.unitOfWork as never,
   );
 }
 

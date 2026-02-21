@@ -8,8 +8,9 @@ import type { WorkflowRunId, CheckpointId, WorkExecutionId } from '../../domain/
 import { WorkflowRunStatus, WorkflowRun } from '../../domain/index.js';
 import { FileSystem } from '../../domain/ports/file-system.js';
 import { GitService } from '@common/ports/index.js';
-import { EventPublisher } from '@common/ports/index.js';
+import { EventPublisher, UnitOfWork } from '@common/ports/index.js';
 import { ApplicationError } from '@common/errors/index.js';
+import { CompensationStack } from '@common/application/compensation-stack.js';
 
 export class WorkflowRunNotFoundError extends ApplicationError {
   constructor(id: WorkflowRunId) {
@@ -46,9 +47,11 @@ export class ResumeWorkflowRunUseCase {
     private readonly fileSystem: FileSystem,
     private readonly gitService: GitService,
     private readonly eventPublisher: EventPublisher,
+    private readonly unitOfWork: UnitOfWork,
   ) {}
 
   async execute(command: ResumeWorkflowRunCommand): Promise<void> {
+    // TRY: Load and validate
     const run = await this.workflowRunRepository.findById(command.workflowRunId);
     if (!run) {
       throw new WorkflowRunNotFoundError(command.workflowRunId);
@@ -60,25 +63,36 @@ export class ResumeWorkflowRunUseCase {
 
     const wasPaused = run.status === WorkflowRunStatus.PAUSED;
 
-    if (wasPaused) {
-      if (command.checkpointId) {
-        // 명시적 checkpoint restore
-        await this.restoreToCheckpoint(run, command.checkpointId);
-      } else if (run.currentWorkIndex > 0 && !run.restoredToCheckpoint) {
-        // 자동 revert: 이전 work의 checkpoint 탐색
-        await this.autoRevertToPreviousCheckpoint(run);
+    // CONFIRM: Checkpoint restore with compensation + resume
+    const compensations = new CompensationStack();
+
+    try {
+      if (wasPaused) {
+        if (command.checkpointId) {
+          await this.restoreToCheckpoint(run, command.checkpointId, compensations);
+        } else if (run.currentWorkIndex > 0 && !run.restoredToCheckpoint) {
+          await this.autoRevertToPreviousCheckpoint(run, compensations);
+        }
       }
+
+      run.resume();
+
+      await this.unitOfWork.run(async () => {
+        await this.workflowRunRepository.save(run);
+        await this.eventPublisher.publishAll(run.clearDomainEvents());
+      });
+    } catch (error) {
+      // CANCEL: Compensate git resets
+      await compensations.runAll();
+      throw error;
     }
-
-    run.resume();
-
-    await this.workflowRunRepository.save(run);
-
-    const allEvents = run.clearDomainEvents();
-    await this.eventPublisher.publishAll(allEvents);
   }
 
-  private async restoreToCheckpoint(run: WorkflowRun, checkpointId: CheckpointId): Promise<void> {
+  private async restoreToCheckpoint(
+    run: WorkflowRun,
+    checkpointId: CheckpointId,
+    compensations: CompensationStack,
+  ): Promise<void> {
     const checkpoint = await this.checkpointRepository.findById(checkpointId);
     if (!checkpoint) {
       throw new CheckpointNotFoundError(checkpointId);
@@ -88,7 +102,11 @@ export class ResumeWorkflowRunUseCase {
     for (const wt of workTrees) {
       const commitHash = checkpoint.getCommitHash(wt.gitId);
       if (commitHash) {
+        const originalHash = await this.gitService.getCurrentCommit(wt.path);
         await this.gitService.reset(wt.path, commitHash);
+        compensations.push(async () => {
+          try { await this.gitService.reset(wt.path, originalHash); } catch { /* best-effort */ }
+        });
       }
     }
 
@@ -98,7 +116,10 @@ export class ResumeWorkflowRunUseCase {
     await this.cleanupExecutions(run, trimmedExecutionIds);
   }
 
-  private async autoRevertToPreviousCheckpoint(run: WorkflowRun): Promise<void> {
+  private async autoRevertToPreviousCheckpoint(
+    run: WorkflowRun,
+    compensations: CompensationStack,
+  ): Promise<void> {
     const checkpoints = await this.checkpointRepository.findByWorkflowRunId(run.id);
     const prevCheckpoint = checkpoints
       .filter((cp) => cp.workSequence < run.currentWorkIndex)
@@ -109,12 +130,15 @@ export class ResumeWorkflowRunUseCase {
       for (const wt of workTrees) {
         const commitHash = prevCheckpoint.getCommitHash(wt.gitId);
         if (commitHash) {
+          const originalHash = await this.gitService.getCurrentCommit(wt.path);
           await this.gitService.reset(wt.path, commitHash);
+          compensations.push(async () => {
+            try { await this.gitService.reset(wt.path, originalHash); } catch { /* best-effort */ }
+          });
         }
       }
     }
 
-    // trim work executions for current work index (새로 생성됨)
     const trimmedExecutionIds = run.workExecutionIds.slice(run.currentWorkIndex);
     run.restoreToCheckpoint(run.currentWorkIndex);
     await this.cleanupWorkSpaces(run, trimmedExecutionIds);

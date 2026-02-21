@@ -4,7 +4,7 @@ import {
 } from '../../domain/index.js';
 import type { WorkflowRunId } from '../../domain/index.js';
 import { AgentService } from '@common/ports/index.js';
-import { EventPublisher } from '@common/ports/index.js';
+import { EventPublisher, UnitOfWork } from '@common/ports/index.js';
 import { ApplicationError } from '@common/errors/index.js';
 
 export class WorkflowRunNotFoundError extends ApplicationError {
@@ -31,9 +31,11 @@ export class PauseWorkflowRunUseCase {
     private readonly workflowRunRepository: WorkflowRunRepository,
     private readonly agentService: AgentService,
     private readonly eventPublisher: EventPublisher,
+    private readonly unitOfWork: UnitOfWork,
   ) {}
 
   async execute(command: PauseWorkflowRunCommand): Promise<void> {
+    // TRY: Load and validate
     const run = await this.workflowRunRepository.findById(command.workflowRunId);
     if (!run) {
       throw new WorkflowRunNotFoundError(command.workflowRunId);
@@ -43,6 +45,7 @@ export class PauseWorkflowRunUseCase {
       throw new WorkflowRunCannotPauseError(command.workflowRunId);
     }
 
+    // CONFIRM: Side effects (best-effort) + state transition + TX save
     const currentWeId = run.currentWorkExecutionId;
     if (currentWeId) {
       try { await this.agentService.stopSession(currentWeId); }
@@ -53,7 +56,9 @@ export class PauseWorkflowRunUseCase {
 
     run.pause();
 
-    await this.workflowRunRepository.save(run);
-    await this.eventPublisher.publishAll(run.clearDomainEvents());
+    await this.unitOfWork.run(async () => {
+      await this.workflowRunRepository.save(run);
+      await this.eventPublisher.publishAll(run.clearDomainEvents());
+    });
   }
 }

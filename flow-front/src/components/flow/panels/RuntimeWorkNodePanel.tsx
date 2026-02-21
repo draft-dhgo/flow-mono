@@ -1,4 +1,4 @@
-import { useForm, useFieldArray } from 'react-hook-form';
+import { useForm, useFieldArray, useWatch } from 'react-hook-form';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Checkbox } from '@/components/ui/checkbox';
@@ -64,6 +64,11 @@ export function RuntimeWorkNodePanel({
   });
 
   const taskArray = useFieldArray({ control: form.control, name: 'taskConfigs' });
+  const watchedModel = useWatch({ control: form.control, name: 'model' });
+  const watchedPauseAfter = useWatch({ control: form.control, name: 'pauseAfter' });
+  const watchedGitRefConfigs = useWatch({ control: form.control, name: 'gitRefConfigs' });
+  const watchedMcpServerRefConfigs = useWatch({ control: form.control, name: 'mcpServerRefConfigs' });
+  const watchedReportFileRefs = useWatch({ control: form.control, name: 'reportFileRefs' });
 
   const handleSubmit = form.handleSubmit((values) => {
     if (mode === 'add') {
@@ -109,7 +114,7 @@ export function RuntimeWorkNodePanel({
           <div>
             <label className="text-sm font-medium">모델</label>
             <Select
-              value={form.watch('model')}
+              value={watchedModel}
               onValueChange={(v) => form.setValue('model', v)}
             >
               <SelectTrigger>
@@ -128,7 +133,7 @@ export function RuntimeWorkNodePanel({
           <div className="flex items-center gap-2">
             <Checkbox
               id={`runtime-pause-${sequence}`}
-              checked={form.watch('pauseAfter')}
+              checked={watchedPauseAfter}
               onCheckedChange={(c) => form.setValue('pauseAfter', c === true)}
             />
             <label htmlFor={`runtime-pause-${sequence}`} className="text-sm">
@@ -141,8 +146,7 @@ export function RuntimeWorkNodePanel({
               <label className="text-sm font-medium">Git Refs</label>
               <div className="space-y-1 mt-1">
                 {gitRefPool.map((g) => {
-                  const selected = form.watch('gitRefConfigs');
-                  const isChecked = selected.some((s) => s.gitId === g.gitId);
+                  const isChecked = watchedGitRefConfigs.some((s) => s.gitId === g.gitId);
                   return (
                     <div key={g.gitId} className="flex items-center gap-2">
                       <Checkbox
@@ -178,8 +182,7 @@ export function RuntimeWorkNodePanel({
               <label className="text-sm font-medium">MCP Servers</label>
               <div className="space-y-1 mt-1">
                 {mcpServerRefPool.map((m) => {
-                  const selected = form.watch('mcpServerRefConfigs');
-                  const isChecked = selected.some((s) => s.mcpServerId === m.mcpServerId);
+                  const isChecked = watchedMcpServerRefConfigs.some((s) => s.mcpServerId === m.mcpServerId);
                   return (
                     <div key={m.mcpServerId} className="flex items-center gap-2">
                       <Checkbox
@@ -215,7 +218,7 @@ export function RuntimeWorkNodePanel({
               (c) => c.sequence < sequence && c.taskCount > 0,
             );
             if (availableWorks.length === 0) return null;
-            const currentRefs: number[] = form.watch('reportFileRefs') ?? [];
+            const currentRefs: number[] = watchedReportFileRefs ?? [];
             return (
               <div>
                 <div className="flex items-center gap-1.5 mb-1">

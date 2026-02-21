@@ -7,6 +7,7 @@ import type {
   QueryResult,
 } from '@common/ports/index.js';
 import type { WorkExecutionId } from '@common/ids/index.js';
+import { ApplicationError } from '@common/errors/index.js';
 import { AgentClient } from '../domain/ports/agent-client.js';
 import { AgentSessionRepository } from '../domain/ports/agent-session-repository.js';
 import { AgentSession } from '../domain/entities/agent-session.js';
@@ -130,7 +131,10 @@ export class AgentServiceImpl extends AgentService {
   async sendQueryForWorkspace(workspaceId: string, query: string): Promise<QueryResult> {
     const sessionId = this.workspaceSessions.get(workspaceId);
     if (!sessionId) {
-      throw new Error(`No agent session found for workspace ${workspaceId}`);
+      throw new ApplicationError(
+        'AGENT_SESSION_NOT_READY',
+        '에이전트 세션이 아직 준비 중입니다. 잠시 후 다시 시도해주세요.',
+      );
     }
     return this.agentClient.sendQuery(sessionId, query);
   }

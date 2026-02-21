@@ -111,10 +111,11 @@ function createMocks() {
     copy: vi.fn(),
     move: vi.fn(),
   };
+  const unitOfWork = { run: async <T>(work: () => Promise<T>) => work() };
   return {
     workflowRunRepository, workExecutionRepository, reportRepository,
     workflowSpaceRepository, workTreeRepository, mcpServerReader, agentService, eventPublisher,
-    workExecutionFactory, workspacePathFactory, fileSystem,
+    workExecutionFactory, workspacePathFactory, fileSystem, unitOfWork,
   };
 }
 
@@ -131,6 +132,7 @@ function createUseCase(mocks: ReturnType<typeof createMocks>) {
     mocks.workExecutionFactory as never,
     mocks.workspacePathFactory as never,
     mocks.fileSystem as never,
+    mocks.unitOfWork as never,
   );
 }
 

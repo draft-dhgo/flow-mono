@@ -8,8 +8,9 @@ import {
 import type { WorkflowRunId, CheckpointId, WorkExecutionId } from '../../domain/index.js';
 import { FileSystem } from '../../domain/ports/file-system.js';
 import { GitService } from '@common/ports/index.js';
-import { EventPublisher } from '@common/ports/index.js';
+import { EventPublisher, UnitOfWork } from '@common/ports/index.js';
 import { ApplicationError } from '@common/errors/index.js';
+import { CompensationStack } from '@common/application/compensation-stack.js';
 
 export class WorkflowRunNotFoundError extends ApplicationError {
   constructor(id: WorkflowRunId) {
@@ -52,9 +53,11 @@ export class RestoreToCheckpointUseCase {
     private readonly gitService: GitService,
     private readonly fileSystem: FileSystem,
     private readonly eventPublisher: EventPublisher,
+    private readonly unitOfWork: UnitOfWork,
   ) {}
 
   async execute(command: RestoreToCheckpointCommand): Promise<void> {
+    // TRY: Load and validate
     const run = await this.workflowRunRepository.findById(command.workflowRunId);
     if (!run) {
       throw new WorkflowRunNotFoundError(command.workflowRunId);
@@ -73,28 +76,37 @@ export class RestoreToCheckpointUseCase {
       throw new CheckpointMismatchError(command.checkpointId, command.workflowRunId);
     }
 
-    // Git worktree reset
-    const workTrees = await this.workTreeRepository.findByWorkflowRunId(run.id);
-    for (const wt of workTrees) {
-      const commitHash = checkpoint.getCommitHash(wt.gitId);
-      if (commitHash) {
-        await this.gitService.reset(wt.path, commitHash);
+    // CONFIRM: Git reset with compensation + cleanup + save
+    const compensations = new CompensationStack();
+
+    try {
+      const workTrees = await this.workTreeRepository.findByWorkflowRunId(run.id);
+      for (const wt of workTrees) {
+        const commitHash = checkpoint.getCommitHash(wt.gitId);
+        if (commitHash) {
+          const originalHash = await this.gitService.getCurrentCommit(wt.path);
+          await this.gitService.reset(wt.path, commitHash);
+          compensations.push(async () => {
+            try { await this.gitService.reset(wt.path, originalHash); } catch { /* best-effort */ }
+          });
+        }
       }
+
+      const trimmedExecutionIds = run.workExecutionIds.slice(checkpoint.workSequence);
+      run.restoreToCheckpoint(checkpoint.workSequence);
+
+      await this.cleanupWorkSpaces(run.id, trimmedExecutionIds);
+      await this.cleanupExecutions(run.id, trimmedExecutionIds);
+
+      await this.unitOfWork.run(async () => {
+        await this.workflowRunRepository.save(run);
+        await this.eventPublisher.publishAll(run.clearDomainEvents());
+      });
+    } catch (error) {
+      // CANCEL: Restore git to original state
+      await compensations.runAll();
+      throw error;
     }
-
-    // Trim execution history
-    const trimmedExecutionIds = run.workExecutionIds.slice(checkpoint.workSequence);
-    run.restoreToCheckpoint(checkpoint.workSequence);
-
-    // Cleanup workspaces
-    await this.cleanupWorkSpaces(run.id, trimmedExecutionIds);
-
-    // Cleanup executions
-    await this.cleanupExecutions(run.id, trimmedExecutionIds);
-
-    // Save and publish
-    await this.workflowRunRepository.save(run);
-    await this.eventPublisher.publishAll(run.clearDomainEvents());
   }
 
   private async cleanupWorkSpaces(

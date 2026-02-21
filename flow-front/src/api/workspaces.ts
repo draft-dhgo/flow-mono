@@ -1,4 +1,4 @@
-import apiClient from './client';
+import { apiClient } from './client';
 import type {
   WorkspaceListItem,
   WorkspaceDetailResponse,
@@ -20,7 +20,7 @@ export const workspacesApi = {
   list: () => apiClient.get<unknown, WorkspaceListItem[]>('/workspaces'),
   get: (id: string) => apiClient.get<unknown, WorkspaceDetailResponse>(`/workspaces/${id}`),
   create: (data: CreateWorkspaceRequest) =>
-    apiClient.post<unknown, { workspaceId: string }>('/workspaces', data),
+    apiClient.post<unknown, { workspaceId: string }>('/workspaces', data, { timeout: 120_000 }),
   delete: (id: string) => apiClient.delete(`/workspaces/${id}`),
   complete: (id: string) => apiClient.post(`/workspaces/${id}/complete`),
   chat: (id: string, data: SendChatMessageRequest) =>

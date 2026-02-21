@@ -8,6 +8,7 @@ import {
 } from '../../domain/value-objects/index.js';
 import { WorkflowId, GitId, McpServerId } from '@common/ids/index.js';
 import { ReportOutline, Section } from '@common/value-objects/index.js';
+import { OptimisticLockError } from '@common/errors/index.js';
 
 interface SerializedTaskNodeConfig {
   order: number;
@@ -171,7 +172,22 @@ export class WorkflowRunTypeormRepository extends WorkflowRunRepository {
 
   async save(workflowRun: WorkflowRun): Promise<void> {
     const row = this.toRow(workflowRun);
-    await this.repo.save(row);
+    if (workflowRun.version > 1) {
+      const result = await this.repo
+        .createQueryBuilder()
+        .update()
+        .set(row as unknown as Record<string, unknown>)
+        .where('id = :id AND version = :version', {
+          id: row.id,
+          version: workflowRun.version - 1,
+        })
+        .execute();
+      if (result.affected === 0) {
+        throw new OptimisticLockError('WorkflowRun', row.id);
+      }
+    } else {
+      await this.repo.save(row);
+    }
   }
 
   async delete(id: WorkflowRunId): Promise<void> {

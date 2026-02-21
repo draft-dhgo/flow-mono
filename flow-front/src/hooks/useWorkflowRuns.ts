@@ -1,5 +1,6 @@
+import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { workflowRunsApi } from '@/api/workflow-runs';
+import { workflowRunsApi, reportsApi } from '@/api/workflow-runs';
 import { queryKeys } from '@/lib/query-keys';
 import type { EditWorkNodeConfigRequest, AddWorkNodeRequest, StartWorkflowRunRequest } from '@/api/types';
 
@@ -189,4 +190,36 @@ export function useWorkflowRunDetail(id: string) {
     startNewRunMutation,
     pushMutation,
   };
+}
+
+export function useReport(workExecutionId: string, isRunning = false) {
+  return useQuery({
+    queryKey: queryKeys.workflowRuns.report(workExecutionId),
+    queryFn: () => reportsApi.get(workExecutionId),
+    enabled: !!workExecutionId,
+    refetchInterval: isRunning ? 5000 : false,
+    retry: (failureCount, error) => {
+      if (error && typeof error === 'object' && 'status' in error && (error as { status: number }).status === 404) {
+        return false;
+      }
+      return failureCount < 3;
+    },
+  });
+}
+
+export function useWorkflowRunWorkspace(runId: string) {
+  const [selectedFilePath, setSelectedFilePath] = useState<string | null>(null);
+
+  const treeQuery = useQuery({
+    queryKey: queryKeys.workflowRuns.workspaceTree(runId),
+    queryFn: () => workflowRunsApi.getWorkspaceTree(runId),
+  });
+
+  const fileContentQuery = useQuery({
+    queryKey: queryKeys.workflowRuns.workspaceFile(runId, selectedFilePath ?? ''),
+    queryFn: () => workflowRunsApi.getWorkspaceFile(runId, selectedFilePath!),
+    enabled: selectedFilePath !== null,
+  });
+
+  return { treeQuery, fileContentQuery, selectedFilePath, setSelectedFilePath };
 }

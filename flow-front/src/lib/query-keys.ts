@@ -16,6 +16,7 @@ export const queryKeys = {
     checkpoints: (id: string) => ['workflow-runs', id, 'checkpoints'] as const,
     workspaceTree: (id: string) => ['workflow-runs', id, 'workspace-tree'] as const,
     workspaceFile: (id: string, filePath: string) => ['workflow-runs', id, 'workspace-file', filePath] as const,
+    report: (workExecutionId: string) => ['reports', workExecutionId] as const,
   },
   agentLogs: {
     byWorkExecution: (runId: string, weId: string) => ['agent-logs', runId, weId] as const,

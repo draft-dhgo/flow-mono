@@ -1,9 +1,21 @@
 import type { Report } from '../domain/entities/report.js';
 import type { ReportId, WorkExecutionId, WorkflowRunId } from '../domain/value-objects/index.js';
 import { ReportRepository } from '../domain/ports/report-repository.js';
+import type { InMemorySnapshotRegistry } from '@common/infra/in-memory-unit-of-work.js';
 
-export class InMemoryReportRepository extends ReportRepository {
+export class InMemoryReportRepository extends ReportRepository implements InMemorySnapshotRegistry {
   private readonly store = new Map<ReportId, Report>();
+
+  snapshot(): Map<unknown, unknown> {
+    return new Map(this.store);
+  }
+
+  restore(snap: Map<unknown, unknown>): void {
+    this.store.clear();
+    for (const [k, v] of snap) {
+      this.store.set(k as ReportId, v as Report);
+    }
+  }
 
   async findById(id: ReportId): Promise<Report | null> {
     return this.store.get(id) ?? null;

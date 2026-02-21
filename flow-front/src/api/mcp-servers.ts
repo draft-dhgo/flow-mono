@@ -1,4 +1,4 @@
-import apiClient from './client';
+import { apiClient } from './client';
 import type { McpServerResponse, RegisterMcpServerRequest } from './types';
 
 export const mcpServersApi = {

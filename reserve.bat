@@ -5,7 +5,7 @@ REM 예시:   reserve.bat 2 30     (2시간 30분 후 실행)
 REM         reserve.bat 0 10     (10분 후 실행)
 REM         reserve.bat           (기본값: 10분 후 실행)
 
-set PROMPT_FILE=loop-save\execution-ux-improvement-prompt.txt
+set PROMPT_FILE=loop-save\frontend-quality-improvement-prompt.txt
 
 if "%~1"=="" (set HOURS=0) else (set HOURS=%~1)
 if "%~2"=="" (set MINUTES=10) else (set MINUTES=%~2)

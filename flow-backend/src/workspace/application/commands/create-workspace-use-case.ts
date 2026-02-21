@@ -164,21 +164,40 @@ export class CreateWorkspaceUseCase {
       );
     }
 
-    // 7. Start agent session
+    // 7. Save workspace (without agent session — will be assigned async)
+    await this.workspaceRepository.save(workspace);
+    await this.eventPublisher.publishAll(workspace.clearDomainEvents());
+
+    // 8. Start agent session async (fire-and-forget from use case perspective)
+    // Session startup can take 30-60s; we return immediately so the HTTP response is fast.
+    this.startAgentSessionAsync(workspaceId, command.model, workspacePath, mcpServerConfigs, systemPrompt)
+      .catch((err: unknown) => {
+        const message = err instanceof Error ? err.message : String(err);
+        console.error(`[CreateWorkspace] Agent session startup failed for ${workspaceId}: ${message}`);
+      });
+
+    return { workspaceId };
+  }
+
+  private async startAgentSessionAsync(
+    workspaceId: WorkspaceId,
+    model: string,
+    workspacePath: string,
+    mcpServerConfigs: McpServerConfig[],
+    systemPrompt: string | undefined,
+  ): Promise<void> {
     const sessionInfo = await this.agentService.startSessionForWorkspace({
       workspaceId,
-      model: command.model,
+      model,
       workspacePath,
       mcpServerConfigs,
       systemPrompt,
     });
 
-    workspace.assignAgentSession(sessionInfo.sessionId);
-
-    // 7. Save + publish events
-    await this.workspaceRepository.save(workspace);
-    await this.eventPublisher.publishAll(workspace.clearDomainEvents());
-
-    return { workspaceId };
+    const workspace = await this.workspaceRepository.findById(workspaceId);
+    if (workspace) {
+      workspace.assignAgentSession(sessionInfo.sessionId);
+      await this.workspaceRepository.save(workspace);
+    }
   }
 }

@@ -1,0 +1,220 @@
+프론트엔드 평가 리포트 001 기반 코드 품질 개선.
+useQuery 직접 사용 위반 4건 제거, 매직 스트링 상수화, client.ts named export 전환, ESLint 경고 해소, 번들 크기 최적화를 수행한다.
+백엔드는 수정하지 않는다. flow-front/CLAUDE.md의 모든 규칙을 준수한다.
+
+수정하지 않는 범위:
+- flow-backend 디렉토리 전체
+- components/ui 디렉토리의 shadcn 컴포넌트
+
+아래 5개 Phase를 순서대로 진행한다.
+각 Phase 완료 후 반드시 아래 검증을 실행한다. 검증 실패 시 수정 후 다시 검증한다. 검증 통과 후 다음 Phase로 진행한다.
+  프론트엔드 검증: cd flow-front && npx tsc -b && npm run lint && npm run build
+각 Phase 완료 후 Playwright MCP를 통해 localhost:5173에 접속하여 실제 화면을 확인하고 문제가 있으면 즉시 수정한다.
+
+수정 항목 목록:
+1. useQuery 직접 사용 위반 제거 -- WorkspaceDetailPage, WorkspaceViewerPanel, ReportViewerPanel, WorkflowListPage
+2. 매직 스트링 상수화 -- DashboardPage, McpServerManagementPage
+3. api/client.ts default export를 named export로 전환
+4. ESLint 경고 3건 해소 -- form.watch를 useWatch로 대체, useMemo deps 수정
+5. React.lazy 기반 코드 스플리팅으로 번들 크기 최적화
+
+----- Phase 1 useQuery 직접 사용 위반 제거 -----
+
+핵심 파일:
+  - flow-front/src/lib/query-keys.ts
+  - flow-front/src/hooks/useWorkflowRuns.ts
+  - flow-front/src/hooks/useWorkflows.ts
+  - flow-front/src/hooks/useWorkspaces.ts
+  - flow-front/src/pages/WorkspaceDetailPage.tsx
+  - flow-front/src/pages/WorkflowListPage.tsx
+  - flow-front/src/components/flow/panels/ReportViewerPanel.tsx
+  - flow-front/src/components/flow/panels/WorkspaceViewerPanel.tsx
+참조할 코드 -- 읽기만, 수정하지 않음:
+  - flow-front/src/api/workflow-runs.ts -- reportsApi, workflowRunsApi의 workspace 메서드
+  - flow-front/src/api/workspaces.ts -- workspacesApi.file, workspacesApi.tree
+  - flow-front/CLAUDE.md -- 아키텍처 규칙
+
+1-1. query-keys.ts에 reports 키 추가
+     workflowRuns 객체 안에 report 키를 추가한다.
+     report 메서드의 파라미터는 workExecutionId이고 반환값은 배열 -- reports, workExecutionId
+
+1-2. useWorkflowRuns.ts에 useReport 훅 추가
+     파일 하단에 export function useReport 훅을 추가한다.
+     파라미터: workExecutionId -- string, isRunning -- boolean, 기본값 false
+     내부에서 useQuery를 호출한다.
+     queryKey는 queryKeys.workflowRuns.report 호출
+     queryFn은 reportsApi.get 호출
+     enabled는 workExecutionId가 truthy일 때
+     refetchInterval은 isRunning이 true이면 5000, false이면 false
+     retry 콜백은 기존 ReportViewerPanel의 로직과 동일 -- 404면 false, 그 외 failureCount 3 미만
+     반환값은 useQuery의 결과 그대로
+
+1-3. useWorkflowRuns.ts에 useWorkflowRunWorkspace 훅 추가
+     파일 하단에 export function useWorkflowRunWorkspace 훅을 추가한다.
+     파라미터: runId -- string
+     내부에 useState로 selectedFilePath 관리
+     treeQuery는 useQuery -- queryKey는 queryKeys.workflowRuns.workspaceTree 호출, queryFn은 workflowRunsApi.getWorkspaceTree 호출
+     fileContentQuery는 useQuery -- queryKey는 queryKeys.workflowRuns.workspaceFile 호출, queryFn은 workflowRunsApi.getWorkspaceFile 호출, enabled는 selectedFilePath가 null이 아닐 때
+     반환값은 treeQuery, fileContentQuery, selectedFilePath, setSelectedFilePath 객체
+
+1-4. useWorkflows.ts에 bulkDeleteMutation 추가
+     useWorkflows 훅 내부에 bulkDeleteMutation을 추가한다.
+     mutationFn은 ids 배열을 받아 Promise.all로 workflowsApi.delete를 각각 호출
+     onSuccess에서 queryClient.invalidateQueries로 queryKeys.workflows.all을 무효화
+     반환 객체에 bulkDeleteMutation을 포함한다.
+
+1-5. ReportViewerPanel.tsx에서 useQuery 직접 사용 제거
+     import에서 useQuery 제거
+     대신 useReport 훅을 import -- from @/hooks/useWorkflowRuns
+     컴포넌트 내부에서 useQuery 호출을 useReport 호출로 교체
+     const reportQuery = useReport 호출 -- 인자 workExecutionId, isRunning 또는 false
+     나머지 JSX는 동일하게 유지
+
+1-6. WorkspaceViewerPanel.tsx에서 useQuery 직접 사용 제거
+     import에서 useQuery 제거
+     대신 useWorkflowRunWorkspace 훅을 import -- from @/hooks/useWorkflowRuns
+     컴포넌트 내부에서 useWorkflowRunWorkspace 호출로 treeQuery, fileContentQuery, selectedFilePath, setSelectedFilePath를 가져온다.
+     기존 useState와 두 개의 useQuery 호출을 제거한다.
+     나머지 JSX는 동일하게 유지
+
+1-7. WorkspaceDetailPage.tsx에서 useQuery 직접 사용 제거
+     import에서 useQuery 제거
+     이미 useWorkspaces.ts에 useWorkspaceFile 훅이 존재한다.
+     useWorkspaceFile 훅을 import -- from @/hooks/useWorkspaces
+     컴포넌트 내부에서 기존 useQuery 호출을 useWorkspaceFile 호출로 교체
+     const fileContentQuery = useWorkspaceFile 호출 -- 인자 id, selectedFile 또는 빈문자열, 그리고 enabled 조건으로 id와 selectedFile 모두 truthy
+     useWorkspaceFile의 세 번째 인자 enabled는 이미 id와 filePath 모두 truthy일 때 true로 설정되므로 추가 조건이 필요 없을 수 있다.
+     workspacesApi와 queryKeys import가 더 이상 필요하지 않으면 제거한다.
+
+1-8. WorkflowListPage.tsx에서 useQueryClient 직접 사용 제거
+     import에서 useQueryClient 제거
+     useWorkflows 훅의 반환값에서 bulkDeleteMutation을 가져온다.
+     handleBulkDelete 함수를 수정한다 -- bulkDeleteMutation.mutate 호출로 교체
+     인자는 selectedIds를 배열로 변환한 값
+     onSuccess 콜백에서 setSelectedIds 초기화, setBulkDeleteOpen false 설정
+     bulkDeleting 상태와 setBulkDeleting을 제거한다 -- 대신 bulkDeleteMutation.isPending 사용
+     workflowsApi와 queryKeys import가 더 이상 필요하지 않으면 제거한다.
+
+1-9. 검증 실행
+     cd flow-front && npx tsc -b && npm run lint && npm run build
+
+----- Phase 2 매직 스트링 상수화 -----
+
+핵심 파일:
+  - flow-front/src/lib/constants.ts
+  - flow-front/src/pages/DashboardPage.tsx
+  - flow-front/src/pages/McpServerManagementPage.tsx
+참조할 코드 -- 읽기만, 수정하지 않음:
+  - flow-front/src/api/types.ts -- 타입 정의 확인
+
+2-1. constants.ts에 대시보드 서머리 카드 색상 맵 추가
+     SUMMARY_CARD_COLOR 상수를 추가한다.
+     키는 running, paused, awaiting, completed, cancelled 이고 값은 각각의 Tailwind 색상 클래스
+     running은 text-green-600
+     paused는 text-yellow-600
+     awaiting는 text-orange-600
+     completed는 text-blue-600
+     cancelled는 text-red-600
+
+2-2. constants.ts에 MCP 전송 타입 색상 맵 추가
+     MCP_TRANSPORT_COLOR 상수를 추가한다.
+     키는 STDIO, SSE, STREAMABLE_HTTP 이고 값은 Tailwind 배지 색상
+     STDIO는 bg-gray-100 text-gray-800
+     SSE는 bg-blue-100 text-blue-800
+     STREAMABLE_HTTP는 bg-purple-100 text-purple-800
+
+2-3. DashboardPage.tsx에서 summaryCards의 인라인 color 제거
+     SUMMARY_CARD_COLOR를 import한다 -- from @/lib/constants
+     summaryCards 배열에서 color 속성을 제거한다.
+     JSX에서 color 대신 SUMMARY_CARD_COLOR에서 key로 조회하여 사용한다.
+
+2-4. McpServerManagementPage.tsx에서 transportColor 인라인 맵 제거
+     MCP_TRANSPORT_COLOR를 import한다 -- from @/lib/constants
+     컴포넌트 내부의 transportColor 변수 선언을 삭제한다.
+     JSX에서 transportColor 참조를 MCP_TRANSPORT_COLOR로 교체한다.
+
+2-5. 검증 실행
+     cd flow-front && npx tsc -b && npm run lint && npm run build
+
+----- Phase 3 client.ts named export 그리고 ESLint 경고 해소 -----
+
+핵심 파일:
+  - flow-front/src/api/client.ts
+  - flow-front/src/api/workflows.ts
+  - flow-front/src/api/workflow-runs.ts
+  - flow-front/src/api/gits.ts
+  - flow-front/src/api/mcp-servers.ts
+  - flow-front/src/api/auth.ts
+  - flow-front/src/api/workspaces.ts
+  - flow-front/src/api/work-lineage.ts
+  - flow-front/src/components/flow/panels/RuntimeWorkNodePanel.tsx
+  - flow-front/src/pages/McpServerManagementPage.tsx
+  - flow-front/src/pages/WorkflowListPage.tsx
+
+3-1. client.ts의 default export를 named export로 변경
+     파일 마지막 줄의 export default apiClient를 export -- 중괄호 안에 apiClient -- 형태로 변경한다.
+
+3-2. client.ts를 import하는 모든 api 파일 수정
+     다음 파일들에서 import apiClient from ./client 를 import -- 중괄호 안에 apiClient -- from ./client 로 변경한다.
+     대상 파일: workflows.ts, workflow-runs.ts, gits.ts, mcp-servers.ts, auth.ts, workspaces.ts, work-lineage.ts
+
+3-3. RuntimeWorkNodePanel.tsx의 form.watch를 useWatch로 변경
+     react-hook-form에서 useWatch를 import한다.
+     컴포넌트 내부에서 form.watch 호출을 useWatch 호출로 교체한다.
+     useWatch의 control 파라미터에 form.control을 전달하고 name 파라미터에 gitRefConfigs를 전달한다.
+     컴포넌트 상단에서 한 번 호출하여 변수에 할당하고, JSX에서 해당 변수를 참조한다.
+
+3-4. McpServerManagementPage.tsx의 form.watch를 useWatch로 변경
+     react-hook-form에서 useWatch를 import한다.
+     컴포넌트 내부에서 form.watch 호출을 useWatch 호출로 교체한다.
+     useWatch의 control 파라미터에 form.control을 전달하고 name 파라미터에 transportType을 전달한다.
+
+3-5. WorkflowListPage.tsx의 useMemo deps 경고 수정
+     현재 data 변수는 listQuery.data 또는 빈 배열로 할당되어 있다.
+     data 변수 할당 자체를 useMemo로 감싼다.
+     그리고 draftIds의 useMemo deps를 수정한다 -- listQuery.data를 직접 참조하여 안정적인 의존성으로 변경.
+     또는 data 선언을 useMemo 안에서 처리하여 경고를 해소한다.
+
+3-6. 검증 실행
+     cd flow-front && npx tsc -b && npm run lint && npm run build
+     ESLint 경고가 0건인지 확인한다. 만약 경고가 남아있으면 즉시 수정한다.
+
+----- Phase 4 React.lazy 코드 스플리팅 -----
+
+핵심 파일:
+  - flow-front/src/App.tsx
+
+4-1. App.tsx에 React.lazy 적용
+     React에서 lazy와 Suspense를 import한다.
+     다음 대형 페이지의 정적 import를 lazy 호출로 교체한다.
+     대상: WorkflowFlowEditorPage, WorkflowRunFlowPage, WorkspaceDetailPage, WorkflowBuilderPage, WorkLineagePage
+     lazy 호출의 import 경로는 기존과 동일하게 유지한다.
+
+4-2. Suspense 래퍼 추가
+     AppLayout 하위의 Route 요소들에서 lazy 로딩된 페이지는 Suspense로 감싼다.
+     Suspense의 fallback에는 로딩 스피너를 표시한다.
+     LoadingSpinner를 import하여 div로 감싸서 화면 중앙에 배치한다.
+
+4-3. 검증 실행
+     cd flow-front && npx tsc -b && npm run lint && npm run build
+     빌드 출력에서 JS 번들 크기 감소를 확인한다. 이전 1023 kB에서 줄어들어야 한다.
+
+----- Phase 5 통합 검증 -----
+
+5-1. Playwright MCP로 localhost:5173에 접속
+     백엔드가 실행 중이 아닐 수 있으므로 프론트엔드 화면 렌더링만 확인한다.
+     로그인 페이지가 정상 표시되는지 확인한다.
+
+5-2. 다음 시나리오를 순서대로 확인한다.
+     - 로그인 페이지 접속 -- /login 경로로 이동하여 렌더링 확인
+     - 대시보드 화면 -- 서머리 카드 영역이 렌더링되는지 확인
+     - 워크플로우 목록 -- /workflows 경로 접속 확인
+     - MCP 서버 관리 -- /mcp-servers 경로 접속 확인
+     - 워크스페이스 목록 -- /workspaces 경로 접속 확인
+     각 페이지에서 콘솔 에러가 없는지 확인한다.
+
+5-3. 최종 검증 실행
+     cd flow-front && npx tsc -b && npm run lint && npm run build
+     ESLint 경고 0건, 빌드 성공을 최종 확인한다.
+
+모든 Phase가 완료되고 전체 검증이 통과하면 FRONTEND_QUALITY_IMPROVEMENT_COMPLETE 를 출력한다.

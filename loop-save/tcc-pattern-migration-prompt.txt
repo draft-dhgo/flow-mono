@@ -1,0 +1,822 @@
+FlowFlow 백엔드의 분산 트랜잭션 제어를 TCC 패턴으로 전환한다.
+UnitOfWork 트랜잭션 경계, Transactional Outbox, Dead Letter Queue, Optimistic Locking 인프라를 구축하고
+모든 workflow-runtime 유스케이스를 Try-Confirm-Cancel 구조로 변경한다.
+In-Memory 모드에서도 스냅샷 기반 롤백으로 동일한 TCC 시맨틱을 보장한다.
+
+수정 금지 영역:
+  - docs/ 디렉토리
+  - README.md
+  - 도메인 엔티티의 상태 전이 로직 -- workflow-run.ts, work-execution.ts의 기존 상태머신은 변경하지 않음
+  - 프론트엔드 -- flow-front/ 디렉토리 전체
+
+CLAUDE.md 규칙 준수:
+  - TypeScript strict mode, any 타입 금지
+  - ESM 모듈 형식
+  - 백엔드 DDD + Hexagonal Architecture + Vertical Slice 패턴 유지
+
+수정할 항목 목록:
+  1. UnitOfWork 포트 및 TypeORM, InMemory 구현체
+  2. CompensationStack 유틸리티
+  3. OptimisticLockError 에러 클래스
+  4. Outbox, DLQ 테이블 마이그레이션 및 스키마
+  5. TransactionalEventPublisher -- Outbox 연동 이벤트 발행기
+  6. InMemory Outbox, InMemory DLQ 구현
+  7. OutboxRelay 폴링 서비스
+  8. DeadLetterQueueService 관리 서비스
+  9. InMemoryEventPublisher 핸들러 에러 격리
+  10. TypeORM 레포지토리 6개 Optimistic Locking 적용
+  11. StartWorkflowRunUseCase TCC 전환
+  12. StartNextWorkExecutionUseCase TCC 전환
+  13. CompleteTaskExecutionUseCase TCC 전환
+  14. SendQueryUseCase TCC 전환
+  15. PauseWorkflowRunUseCase TCC 전환
+  16. CancelWorkflowRunUseCase TCC 전환
+  17. ResumeWorkflowRunUseCase TCC 전환
+  18. RestoreToCheckpointUseCase TCC 전환
+  19. WorkflowPipelineServiceImpl에 OptimisticLockError 재시도 추가
+  20. SharedModule, AppModule, WorkflowRuntimeModule DI 배선 갱신
+  21. flow-backend/CLAUDE.md 아키텍처 규칙 갱신 -- TCC 패턴, Outbox, OL, 디렉토리 구조 반영
+
+아래 8개 Phase를 순서대로 진행한다.
+각 Phase 완료 후 반드시 아래 검증을 실행한다. 검증 실패 시 수정 후 다시 검증한다. 검증 통과 후 다음 Phase로 진행한다.
+  백엔드 검증: cd flow-backend && npm run typecheck && npm run test && npm run lint
+
+----- Phase 1 인프라 기반 -- UnitOfWork, CompensationStack, OptimisticLockError -----
+
+핵심 파일 -- 신규 생성:
+  - flow-backend/src/common/ports/unit-of-work.ts
+  - flow-backend/src/common/infra/typeorm/typeorm-unit-of-work.ts
+  - flow-backend/src/common/infra/in-memory-unit-of-work.ts
+  - flow-backend/src/common/application/compensation-stack.ts
+  - flow-backend/src/common/errors/optimistic-lock-error.ts
+참조할 코드 -- 읽기만, 수정하지 않음:
+  - flow-backend/src/common/aggregate-root.ts -- AggregateRoot 베이스 클래스, version 필드 관리
+  - flow-backend/src/common/errors/domain-error.ts -- DomainError 베이스 클래스, isTransient 플래그
+  - flow-backend/src/common/errors/application-error.ts -- ApplicationError 베이스 클래스
+  - flow-backend/src/workflow-runtime/infra/in-memory-work-execution-repository.ts -- Map 기반 InMemory 패턴 참조
+
+1-1. UnitOfWork 추상 포트 생성
+     flow-backend/src/common/ports/unit-of-work.ts 파일을 생성한다.
+     추상 클래스 UnitOfWork를 정의한다.
+     추상 메서드 run -- 제네릭 T, 파라미터로 Promise of T를 반환하는 콜백 함수, 반환값은 Promise of T
+     이 메서드는 콜백 내 모든 저장 작업을 하나의 트랜잭션으로 묶는 역할을 한다.
+
+1-2. TypeORM UnitOfWork 구현
+     flow-backend/src/common/infra/typeorm/typeorm-unit-of-work.ts 파일을 생성한다.
+     Injectable 데코레이터 적용.
+     생성자에서 DataSource를 주입받는다.
+     run 메서드 구현:
+       - this.dataSource.createQueryRunner 호출로 QueryRunner 생성
+       - queryRunner.connect 호출
+       - queryRunner.startTransaction 호출
+       - 콜백 실행
+       - 성공 시 queryRunner.commitTransaction 호출
+       - 실패 시 queryRunner.rollbackTransaction 호출
+       - finally에서 queryRunner.release 호출
+       - 콜백의 반환값을 그대로 반환
+
+1-3. InMemory UnitOfWork 구현
+     flow-backend/src/common/infra/in-memory-unit-of-work.ts 파일을 생성한다.
+     Injectable 데코레이터 적용.
+     InMemorySnapshotRegistry 인터페이스 정의:
+       snapshot 메서드 -- 현재 Map 상태를 shallow clone하여 반환
+       restore 메서드 -- 파라미터로 받은 스냅샷을 원래 Map에 복원
+     snapshotTargets 배열을 유지한다 -- InMemorySnapshotRegistry를 구현하는 레포지토리들을 등록
+     registerTarget 메서드로 스냅샷 대상 등록.
+     run 메서드 구현:
+       - 모든 등록된 타겟의 snapshot 호출하여 스냅샷 배열 저장
+       - try에서 콜백 실행
+       - catch에서 모든 타겟에 대해 restore 호출하여 롤백 후 에러 재던짐
+       - 콜백의 반환값을 그대로 반환
+     IMPORTANT: 기존 InMemory 레포지토리들도 InMemorySnapshotRegistry 인터페이스를 구현하도록 변경해야 하므로
+     이 파일에 InMemorySnapshotRegistry 인터페이스를 export한다.
+
+1-4. CompensationStack 유틸리티 생성
+     flow-backend/src/common/application/compensation-stack.ts 파일을 생성한다.
+     CompensationStack 클래스를 정의한다.
+     private readonly actions 배열 -- 각 항목은 Promise of void를 반환하는 함수
+     push 메서드 -- 보상 액션을 배열에 추가
+     runAll 메서드 -- LIFO 순서로 역순 실행, 개별 실패 시 Logger.error로 로깅 후 다음 계속 실행
+     size getter -- 등록된 액션 수 반환
+
+1-5. OptimisticLockError 생성
+     flow-backend/src/common/errors/optimistic-lock-error.ts 파일을 생성한다.
+     DomainError를 상속한다 -- domain-error.ts에서 import
+     생성자 파라미터: entityName 문자열, entityId 문자열
+     코드: OPTIMISTIC_LOCK_CONFLICT
+     메시지: Concurrent modification detected for entityName:entityId
+     isTransient을 true로 설정 -- 재시도 가능한 에러임을 표시
+
+1-6. 포트 인덱스 갱신
+     flow-backend/src/common/ports/index.ts에 UnitOfWork export를 추가한다.
+     flow-backend/src/common/errors/index.ts에 OptimisticLockError export를 추가한다.
+
+1-7. 검증 실행
+     cd flow-backend && npm run typecheck && npm run test && npm run lint
+
+----- Phase 2 Outbox, DLQ 인프라 -- 마이그레이션, 스키마, 이벤트 발행기, 릴레이 -----
+
+핵심 파일 -- 신규 생성:
+  - flow-backend/src/common/infra/typeorm/migrations/004-outbox-and-dlq.ts
+  - flow-backend/src/common/infra/typeorm/outbox-message.schema.ts
+  - flow-backend/src/common/infra/typeorm/dead-letter-message.schema.ts
+  - flow-backend/src/common/infra/transactional-event-publisher.ts
+  - flow-backend/src/common/infra/in-memory-outbox.ts
+  - flow-backend/src/common/infra/in-memory-dead-letter-queue.ts
+  - flow-backend/src/common/infra/outbox-relay.ts
+  - flow-backend/src/common/infra/dead-letter-queue-service.ts
+핵심 파일 -- 수정:
+  - flow-backend/src/common/infra/in-memory-event-publisher.ts
+  - flow-backend/src/common/infra/persistent-event-publisher.ts
+참조할 코드 -- 읽기만, 수정하지 않음:
+  - flow-backend/src/common/infra/typeorm/migrations/002-domain-events.ts -- 마이그레이션 패턴 참조
+  - flow-backend/src/common/infra/typeorm/domain-event.schema.ts -- EntitySchema 패턴 참조
+  - flow-backend/src/common/events/domain-event.ts -- DomainEvent 인터페이스
+
+2-1. Outbox, DLQ 마이그레이션 생성
+     flow-backend/src/common/infra/typeorm/migrations/004-outbox-and-dlq.ts 파일을 생성한다.
+     MigrationInterface를 구현하는 OutboxAndDlq004 클래스를 생성한다.
+     002-domain-events.ts와 동일한 패턴을 따른다.
+     up 메서드에서:
+       outbox_messages 테이블 생성:
+         id UUID PRIMARY KEY DEFAULT gen_random_uuid 호출
+         event_id UUID NOT NULL
+         event_type VARCHAR 100 NOT NULL
+         payload JSONB NOT NULL DEFAULT 빈 객체
+         aggregate_id VARCHAR 255 nullable
+         correlation_id VARCHAR 255 nullable
+         occurred_at TIMESTAMPTZ NOT NULL
+         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW 호출
+         published BOOLEAN NOT NULL DEFAULT FALSE
+         published_at TIMESTAMPTZ nullable
+         retry_count INT NOT NULL DEFAULT 0
+       인덱스: idx_outbox_unpublished ON outbox_messages -- published, created_at -- WHERE NOT published 조건부 인덱스
+       dead_letter_messages 테이블 생성:
+         id UUID PRIMARY KEY DEFAULT gen_random_uuid 호출
+         outbox_message_id UUID NOT NULL
+         event_type VARCHAR 100 NOT NULL
+         payload JSONB NOT NULL
+         aggregate_id VARCHAR 255 nullable
+         correlation_id VARCHAR 255 nullable
+         handler_name VARCHAR 255 NOT NULL
+         error_message TEXT nullable
+         error_stack TEXT nullable
+         retry_count INT NOT NULL DEFAULT 0
+         max_retries INT NOT NULL DEFAULT 5
+         first_failed_at TIMESTAMPTZ NOT NULL DEFAULT NOW 호출
+         last_failed_at TIMESTAMPTZ NOT NULL DEFAULT NOW 호출
+         resolved BOOLEAN NOT NULL DEFAULT FALSE
+         resolved_at TIMESTAMPTZ nullable
+       인덱스: idx_dlq_unresolved ON dead_letter_messages -- resolved, last_failed_at -- WHERE NOT resolved 조건부 인덱스
+     down 메서드에서 인덱스와 테이블을 DROP한다.
+
+2-2. Outbox EntitySchema 생성
+     flow-backend/src/common/infra/typeorm/outbox-message.schema.ts 파일을 생성한다.
+     OutboxMessageRow 인터페이스 정의 -- 2-1의 컬럼과 일치
+     EntitySchema of OutboxMessageRow 를 OutboxMessageSchema로 export
+     domain-event.schema.ts와 동일한 패턴을 따른다.
+
+2-3. DLQ EntitySchema 생성
+     flow-backend/src/common/infra/typeorm/dead-letter-message.schema.ts 파일을 생성한다.
+     DeadLetterMessageRow 인터페이스 정의
+     EntitySchema of DeadLetterMessageRow 를 DeadLetterMessageSchema로 export
+
+2-4. InMemory Outbox 구현
+     flow-backend/src/common/infra/in-memory-outbox.ts 파일을 생성한다.
+     InMemoryOutbox 클래스를 정의한다.
+     private messages 배열로 OutboxMessage 타입 항목 보관
+     OutboxMessage 타입: id, eventId, eventType, payload, aggregateId, correlationId, occurredAt, createdAt, published, publishedAt, retryCount
+     add 메서드 -- 새 메시지 추가, published는 false
+     findUnpublished 메서드 -- published가 false인 메시지 배열 반환
+     markPublished 메서드 -- id로 찾아서 published를 true, publishedAt를 현재시각으로 설정
+     incrementRetry 메서드 -- retryCount 증가
+     clear 메서드 -- 전체 초기화
+
+2-5. InMemory DLQ 구현
+     flow-backend/src/common/infra/in-memory-dead-letter-queue.ts 파일을 생성한다.
+     InMemoryDeadLetterQueue 클래스를 정의한다.
+     private entries 배열로 DeadLetterEntry 타입 항목 보관
+     add 메서드, findUnresolved 메서드, markResolved 메서드, retry 메서드 등 기본 CRUD
+
+2-6. TransactionalEventPublisher 생성
+     flow-backend/src/common/infra/transactional-event-publisher.ts 파일을 생성한다.
+     EventPublisher를 상속한다.
+     생성자 파라미터:
+       - outboxRepo -- TypeORM Repository of OutboxMessageRow 또는 null
+       - inMemoryOutbox -- InMemoryOutbox 인스턴스
+       - inner -- InMemoryEventPublisher 인스턴스 -- 즉시 핸들러 디스패치용
+     publish 메서드:
+       - outboxRepo가 있으면 outboxRepo.save 호출로 Outbox 테이블에 이벤트 기록
+       - outboxRepo가 없으면 inMemoryOutbox.add 호출
+       - inner.publish 호출로 즉시 인메모리 핸들러 디스패치
+     publishAll 메서드 -- 순회하며 publish 호출
+     subscribe, unsubscribe -- inner에 위임
+     getPublishedEvents, clear -- inner에 위임
+
+2-7. persistent-event-publisher.ts 수정
+     flow-backend/src/common/infra/persistent-event-publisher.ts 파일을 수정한다.
+     IMPORTANT: 기존 PersistentEventPublisher는 유지하되 TransactionalEventPublisher가 이를 대체한다.
+     PersistentEventPublisher 클래스는 그대로 두되 deprecated 주석을 추가한다.
+     SharedModule에서 EventPublisher 프로바이더를 TransactionalEventPublisher로 교체할 것이다 -- Phase 5에서 처리
+
+2-8. InMemoryEventPublisher 핸들러 에러 격리
+     flow-backend/src/common/infra/in-memory-event-publisher.ts 수정
+     publish 메서드의 핸들러 순회 부분을 수정한다.
+     현재는 핸들러가 하나라도 에러를 던지면 나머지 핸들러가 실행되지 않는다.
+     변경: 각 핸들러 호출을 try-catch로 감싼다.
+     catch 블록에서:
+       - Logger.error로 에러 로깅 -- handler execution failed for event.eventType
+       - onHandlerError 콜백이 등록되어 있으면 호출 -- 이벤트, 핸들러명, 에러 전달
+       - 에러를 던지지 않고 계속 진행
+     onHandlerError 콜백 등록을 위한 setErrorCallback 메서드 추가
+
+2-9. OutboxRelay 폴링 서비스 생성
+     flow-backend/src/common/infra/outbox-relay.ts 파일을 생성한다.
+     Injectable 데코레이터 적용, OnModuleInit과 OnModuleDestroy 구현
+     생성자 파라미터:
+       - outboxRepo -- TypeORM Repository of OutboxMessageRow 또는 null
+       - inMemoryOutbox -- InMemoryOutbox
+       - eventPublisher -- InMemoryEventPublisher -- 핸들러 디스패치용
+       - dlqRepo -- TypeORM Repository of DeadLetterMessageRow 또는 null
+       - inMemoryDlq -- InMemoryDeadLetterQueue
+     onModuleInit에서:
+       - 5초 간격 setInterval로 processOutbox 호출
+     processOutbox 메서드:
+       - DB 모드: outbox_messages에서 published가 false인 메시지를 created_at 순서로 100개 조회
+       - InMemory 모드: inMemoryOutbox.findUnpublished 호출
+       - 각 메시지에 대해:
+         - DomainEvent로 재구성하여 핸들러에 디스패치 시도
+         - 성공 시 markPublished 처리
+         - 실패 시 retryCount 증가, MAX_RETRIES 5 초과 시 DLQ로 이동
+     onModuleDestroy에서 clearInterval
+     IMPORTANT: OutboxRelay는 publish 실패 시 재전달을 보장하는 안전망이다.
+     정상 경로에서는 TransactionalEventPublisher가 즉시 디스패치하므로 OutboxRelay는 백업 역할만 한다.
+
+2-10. DeadLetterQueueService 생성
+      flow-backend/src/common/infra/dead-letter-queue-service.ts 파일을 생성한다.
+      Injectable 데코레이터 적용.
+      생성자에서 DLQ 레포지토리 또는 InMemoryDeadLetterQueue를 받는다.
+      listUnresolved 메서드 -- 미해결 DLQ 항목 목록 반환
+      retry 메서드 -- 특정 DLQ 항목 재시도
+      resolve 메서드 -- 수동 해결 처리
+
+2-11. 검증 실행
+      cd flow-backend && npm run typecheck && npm run test && npm run lint
+
+----- Phase 3 Optimistic Locking 적용 -----
+
+핵심 파일 -- 수정:
+  - flow-backend/src/workflow-runtime/infra/typeorm/workflow-run-typeorm-repository.ts
+  - flow-backend/src/workflow-runtime/infra/typeorm/work-execution-typeorm-repository.ts
+  - flow-backend/src/workflow-runtime/infra/typeorm/checkpoint-typeorm-repository.ts
+  - flow-backend/src/workflow-runtime/infra/typeorm/workflow-space-typeorm-repository.ts
+  - flow-backend/src/workflow-runtime/infra/typeorm/work-tree-typeorm-repository.ts
+  - flow-backend/src/workflow-runtime/infra/typeorm/report-typeorm-repository.ts
+  - flow-backend/src/workflow-runtime/infra/workflow-pipeline-service-impl.ts
+참조할 코드:
+  - flow-backend/src/common/errors/optimistic-lock-error.ts -- Phase 1에서 생성한 에러 클래스
+
+3-1. WorkflowRunTypeormRepository에 Optimistic Locking 적용
+     flow-backend/src/workflow-runtime/infra/typeorm/workflow-run-typeorm-repository.ts의 save 메서드를 수정한다.
+     현재 코드는 172-174 라인:
+       async save -- workflowRun 파라미터 -- : Promise of void
+         const row = this.toRow -- workflowRun 인자
+         await this.repo.save -- row 인자
+     변경 패턴:
+       const row = this.toRow -- workflowRun 인자
+       version이 1보다 크면 -- 기존 엔티티의 업데이트
+         createQueryBuilder로 update 쿼리를 구성한다
+         set에 row를 전달한다
+         where 조건으로 id가 row.id이고 version이 workflowRun.version - 1인 행만 업데이트한다
+         execute 후 affected가 0이면 OptimisticLockError를 던진다 -- entityName은 WorkflowRun, entityId는 row.id
+       version이 1 이하이면 -- 최초 저장
+         기존대로 this.repo.save -- row 인자 -- 호출
+     OptimisticLockError를 import한다.
+
+3-2. 나머지 5개 TypeORM 레포지토리에 동일 패턴 적용
+     WorkExecutionTypeormRepository, CheckpointTypeormRepository, WorkflowSpaceTypeormRepository,
+     WorkTreeTypeormRepository, ReportTypeormRepository의 save 메서드에 동일한 Optimistic Locking 패턴을 적용한다.
+     각 레포지토리에서 entityName만 해당 엔티티명으로 변경한다.
+     IMPORTANT: Checkpoint, WorkTree, Report는 version 필드가 있는 경우에만 적용한다.
+     version 필드가 없는 엔티티는 기존 save 패턴을 유지한다.
+     각 엔티티의 스키마 파일을 확인하여 version 컬럼이 있는지 먼저 확인한다.
+
+3-3. WorkflowPipelineServiceImpl에 OptimisticLockError 재시도 추가
+     flow-backend/src/workflow-runtime/infra/workflow-pipeline-service-impl.ts의 isRetryable 메서드를 수정한다.
+     현재 코드는 112-116 라인:
+       private isRetryable -- err 파라미터 -- : boolean
+         if err instanceof ApplicationError 그리고 err.code.includes NOT_FOUND
+           return false
+         return true
+     변경: OptimisticLockError 체크를 추가한다.
+       import DomainError from common/errors
+       import OptimisticLockError from common/errors
+       err이 DomainError 인스턴스이고 err.isTransient가 true이면 return true
+       기존 ApplicationError NOT_FOUND 체크 유지
+
+3-4. 검증 실행
+     cd flow-backend && npm run typecheck && npm run test && npm run lint
+
+----- Phase 4 TCC 유스케이스 전환 -----
+
+핵심 파일 -- 수정:
+  - flow-backend/src/workflow-runtime/application/commands/start-workflow-run-use-case.ts
+  - flow-backend/src/workflow-runtime/application/commands/start-next-work-execution-use-case.ts
+  - flow-backend/src/workflow-runtime/application/commands/complete-task-execution-use-case.ts
+  - flow-backend/src/workflow-runtime/application/commands/send-query-use-case.ts
+  - flow-backend/src/workflow-runtime/application/commands/pause-workflow-run-use-case.ts
+  - flow-backend/src/workflow-runtime/application/commands/cancel-workflow-run-use-case.ts
+  - flow-backend/src/workflow-runtime/application/commands/resume-workflow-run-use-case.ts
+  - flow-backend/src/workflow-runtime/application/commands/restore-to-checkpoint-use-case.ts
+참조할 코드:
+  - flow-backend/src/common/ports/unit-of-work.ts -- Phase 1에서 생성
+  - flow-backend/src/common/application/compensation-stack.ts -- Phase 1에서 생성
+
+4-1. StartWorkflowRunUseCase TCC 전환
+     flow-backend/src/workflow-runtime/application/commands/start-workflow-run-use-case.ts를 수정한다.
+     생성자에 UnitOfWork를 추가 주입한다 -- common/ports에서 import
+     execute 메서드를 TCC 구조로 재구성한다:
+
+     TRY PHASE -- 검증 그리고 DB 예약:
+       - 기존 입력 검증 로직 유지 -- workflow 조회, ACTIVE 확인, issueKey 검증, seedValues 검증
+       - workflowRunFactory.build 호출로 run 엔티티 메모리 생성
+       - 아직 run.start 호출하지 않음 -- INITIALIZED 상태 유지
+       - WorkflowSpace 메모리 생성
+       - unitOfWork.run 호출 내에서:
+         - workflowRunRepository.save -- run 인자
+         - workflowSpaceRepository.save -- workflowSpace 인자
+       - 이 TX가 실패하면 자동 롤백되므로 별도 보상 불필요
+
+     CONFIRM PHASE -- 사이드이펙트 실행:
+       - CompensationStack 인스턴스를 생성한다
+       - 파일시스템 디렉토리 생성 후 compensations.push로 deleteDirectory 보상 등록
+       - git worktree 생성 루프:
+         - gitService.fetch 호출
+         - 기존 브랜치 존재 시 cleanup
+         - gitService.createWorktree 호출 후 compensations.push로 deleteWorktree 보상 등록
+         - installPrePushHook, unsetUpstream 호출
+         - workTreeRepository.save 호출
+       - run.start 호출 -- RUNNING 상태 전이
+       - unitOfWork.run 호출 내에서:
+         - workflowRunRepository.save -- run 인자 -- 상태 업데이트
+         - eventPublisher.publishAll -- run.clearDomainEvents 결과
+       - 결과 반환
+
+     CANCEL PHASE -- try-catch로 CONFIRM 실패 시:
+       - compensations.runAll 호출
+       - run.cancel 호출 -- 실패 사유 포함
+       - workflowRunRepository.save 호출 -- best-effort
+       - 원래 에러 재던짐
+
+4-2. StartNextWorkExecutionUseCase TCC 전환
+     flow-backend/src/workflow-runtime/application/commands/start-next-work-execution-use-case.ts를 수정한다.
+     생성자에 UnitOfWork를 추가 주입한다.
+
+     TRY PHASE:
+       - WorkflowRun 로드, RUNNING 상태 확인
+       - currentConfig 로드
+       - WorkExecution lazy 생성 -- 기존 ID가 있으면 로드, 없으면 factory로 생성
+       - unitOfWork.run 내에서:
+         - workExecutionRepository.save
+         - 생성된 report들 reportRepository.save
+         - run.addWorkExecution 호출 -- 새 WE의 경우
+
+     CONFIRM PHASE:
+       - CompensationStack 생성
+       - MCP 설정 구성
+       - WorkflowSpace 로드
+       - 워크스페이스 디렉토리 생성 후 보상 등록
+       - git worktree symlink 생성 후 보상 등록
+       - report symlink 생성 후 보상 등록
+       - workflowSpace에 workSpace 추가, save
+       - agentService.startSession 호출 후 보상으로 stopSession, deleteSession 등록
+       - unitOfWork.run 내에서:
+         - workflowRunRepository.save
+         - eventPublisher.publishAll -- run 그리고 workExecution의 도메인 이벤트
+
+     CANCEL PHASE:
+       - compensations.runAll 호출
+       - 에러 재던짐
+
+4-3. CompleteTaskExecutionUseCase TCC 전환
+     flow-backend/src/workflow-runtime/application/commands/complete-task-execution-use-case.ts를 수정한다.
+     생성자에 UnitOfWork를 추가 주입한다.
+     이 유스케이스는 사이드이펙트가 git getCurrentCommit 읽기뿐이므로 DB-only TCC이다.
+
+     TRY PHASE:
+       - WorkExecution 로드, 현재 태스크 검증, advanceToNextTask 호출
+       - isWorkComplete이면:
+         - workTrees에서 commit hash 수집 -- 읽기 전용 사이드이펙트
+         - Checkpoint 메모리 생성
+         - run.advanceWork 호출
+         - pauseAfter 확인하여 run.await 호출
+
+     CONFIRM PHASE -- 단일 UnitOfWork TX:
+       - unitOfWork.run 내에서:
+         - checkpointRepository.save -- checkpoint 인자 -- checkpoint가 있는 경우
+         - workflowRunRepository.save -- run 인자 -- run이 있는 경우
+         - workExecutionRepository.save -- workExecution 인자
+         - eventPublisher.publishAll -- 모든 aggregate의 도메인 이벤트를 모아서 발행
+       - TX 실패 시 자동 롤백
+
+     CANCEL PHASE: TX 롤백으로 충분하므로 별도 보상 불필요
+
+4-4. SendQueryUseCase TCC 전환
+     flow-backend/src/workflow-runtime/application/commands/send-query-use-case.ts를 수정한다.
+     생성자에 UnitOfWork를 추가 주입한다.
+
+     TRY PHASE:
+       - WorkExecution 로드, terminal 확인, currentTask 확인
+       - 에이전트 세션 찾기
+       - 쿼리 구성 -- report outline 보강 포함
+
+     CONFIRM PHASE:
+       - CompensationStack 생성
+       - agentService.sendQuery 호출 -- 사이드이펙트
+       - currentTask.markCompleted 호출
+       - report가 있는 경우:
+         - 리포트 디렉토리 생성
+         - fileSystem.createFile로 리포트 저장 후 보상으로 deleteFile 등록
+         - report.complete 호출
+       - unitOfWork.run 내에서:
+         - workExecutionRepository.save
+         - reportRepository.save -- report가 있는 경우
+         - eventPublisher.publishAll -- report 이벤트 그리고 QueryResponded 이벤트
+
+     CANCEL PHASE:
+       - compensations.runAll -- 리포트 파일 삭제
+       - 기존 catch 로직 유지 -- currentTask.markFailed, workExecutionRepository.save
+       - QueryFailedError 던짐
+
+4-5. PauseWorkflowRunUseCase TCC 전환
+     flow-backend/src/workflow-runtime/application/commands/pause-workflow-run-use-case.ts를 수정한다.
+     생성자에 UnitOfWork를 추가 주입한다.
+
+     TRY PHASE:
+       - WorkflowRun 로드, canPause 확인
+
+     CONFIRM PHASE:
+       - 에이전트 세션 중지 시도 -- 사이드이펙트, 실패해도 계속
+       - 에이전트 세션 삭제 시도 -- 사이드이펙트, 실패해도 계속
+       - run.pause 호출
+       - unitOfWork.run 내에서:
+         - workflowRunRepository.save
+         - eventPublisher.publishAll
+
+     CANCEL PHASE: 에이전트 세션 중지는 best-effort이므로 별도 보상 불필요
+
+4-6. CancelWorkflowRunUseCase TCC 전환
+     flow-backend/src/workflow-runtime/application/commands/cancel-workflow-run-use-case.ts를 수정한다.
+     생성자에 UnitOfWork를 추가 주입한다.
+
+     TRY PHASE:
+       - WorkflowRun 로드, terminal 상태 확인
+       - WorkExecutions 로드
+
+     CONFIRM PHASE:
+       - 각 비터미널 WE에 대해 agentService.stopSession, deleteSession 시도 -- best-effort
+       - 각 비터미널 WE에 대해 we.cancel 호출
+       - run.cancel 호출
+       - unitOfWork.run 내에서:
+         - workExecutionRepository.saveAll
+         - workflowRunRepository.save
+         - eventPublisher.publishAll -- 모든 이벤트
+
+     CANCEL PHASE: 에이전트 세션은 timeout 정리, DB는 TX 롤백
+
+4-7. ResumeWorkflowRunUseCase TCC 전환
+     flow-backend/src/workflow-runtime/application/commands/resume-workflow-run-use-case.ts를 수정한다.
+     생성자에 UnitOfWork를 추가 주입한다.
+
+     TRY PHASE:
+       - WorkflowRun 로드, canResume 확인
+       - wasPaused 상태 확인
+
+     CONFIRM PHASE:
+       - CompensationStack 생성
+       - wasPaused이고 checkpointId가 있으면:
+         - restoreToCheckpoint 내부:
+           - 각 worktree에 대해 git reset 실행
+           - reset 전의 원래 commit hash를 보상으로 등록 -- compensations.push로 gitService.reset 원복
+           - run.restoreToCheckpoint 호출
+           - cleanupWorkSpaces, cleanupExecutions 호출
+       - wasPaused이고 checkpointId 없고 currentWorkIndex 0보다 크고 restoredToCheckpoint가 false이면:
+         - autoRevertToPreviousCheckpoint 내부에 동일한 보상 등록
+       - run.resume 호출
+       - unitOfWork.run 내에서:
+         - workflowRunRepository.save
+         - eventPublisher.publishAll
+
+     CANCEL PHASE:
+       - compensations.runAll -- git reset 원복
+       - 에러 재던짐
+
+4-8. RestoreToCheckpointUseCase TCC 전환
+     flow-backend/src/workflow-runtime/application/commands/restore-to-checkpoint-use-case.ts를 수정한다.
+     생성자에 UnitOfWork를 추가 주입한다.
+     ResumeWorkflowRunUseCase의 restoreToCheckpoint과 유사한 패턴을 따른다.
+
+     TRY PHASE:
+       - run 로드, RUNNING이면 에러
+       - checkpoint 로드, 소속 확인
+
+     CONFIRM PHASE:
+       - CompensationStack 생성
+       - git reset 실행, 원래 hash 보상 등록
+       - run.restoreToCheckpoint 호출
+       - cleanupWorkSpaces, cleanupExecutions 호출
+       - unitOfWork.run 내에서:
+         - workflowRunRepository.save
+         - eventPublisher.publishAll
+
+     CANCEL PHASE:
+       - compensations.runAll
+       - 에러 재던짐
+
+4-9. 검증 실행
+     cd flow-backend && npm run typecheck && npm run test && npm run lint
+
+----- Phase 5 모듈 DI 배선 갱신 -----
+
+핵심 파일 -- 수정:
+  - flow-backend/src/common/presentation/shared.module.ts
+  - flow-backend/src/app.module.ts
+  - flow-backend/src/workflow-runtime/presentation/workflow-runtime.module.ts
+핵심 파일 -- 수정 가능:
+  - flow-backend/src/workflow-runtime/infra/in-memory-work-execution-repository.ts
+  - flow-backend/src/workflow-runtime/infra/in-memory-report-repository.ts
+  - flow-backend/src/workflow-runtime/infra/in-memory-checkpoint-repository.ts
+  - flow-backend/src/workflow-runtime/infra/in-memory-work-tree-repository.ts
+  - flow-backend/src/workflow-runtime/infra/in-memory-workflow-space-repository.ts
+  - flow-backend/src/workflow-runtime/infra/in-memory-workflow-run-repository.ts
+
+5-1. InMemory 레포지토리들에 InMemorySnapshotRegistry 인터페이스 구현
+     Phase 1에서 정의한 InMemorySnapshotRegistry 인터페이스를 각 InMemory 레포지토리에 구현한다.
+     snapshot 메서드: 현재 store Map을 new Map 호출로 shallow clone하여 반환
+     restore 메서드: 파라미터로 받은 Map으로 store를 교체
+     대상: InMemoryWorkflowRunRepository, InMemoryWorkExecutionRepository, InMemoryReportRepository,
+     InMemoryCheckpointRepository, InMemoryWorkTreeRepository, InMemoryWorkflowSpaceRepository
+
+5-2. SharedModule 수정
+     flow-backend/src/common/presentation/shared.module.ts를 수정한다.
+     기존 EventPublisher 프로바이더를 TransactionalEventPublisher 기반으로 교체한다.
+
+     추가할 프로바이더:
+       UnitOfWork 프로바이더:
+         useFactory에서 DataSource가 있고 initialized이면 TypeOrmUnitOfWork 생성
+         아니면 InMemoryUnitOfWork 생성
+         inject에 DataSource를 optional로 지정
+
+       InMemoryOutbox 프로바이더:
+         useClass로 InMemoryOutbox 지정
+
+       InMemoryDeadLetterQueue 프로바이더:
+         useClass로 InMemoryDeadLetterQueue 지정
+
+       EventPublisher 프로바이더 교체:
+         useFactory에서 DataSource, InMemoryOutbox, InMemoryDeadLetterQueue를 받아
+         TransactionalEventPublisher를 생성한다
+         DB 모드이면 outboxRepo에 DataSource.getRepository 호출로 OutboxMessageSchema 레포 전달
+         아니면 outboxRepo는 null
+
+       OutboxRelay 프로바이더:
+         useFactory에서 DataSource, InMemoryOutbox, EventPublisher, InMemoryDeadLetterQueue를 받아 생성
+         DB 모드이면 outboxRepo와 dlqRepo에 DataSource.getRepository 호출 결과 전달
+
+       DeadLetterQueueService 프로바이더:
+         useFactory에서 DataSource, InMemoryDeadLetterQueue를 받아 생성
+
+     exports에 UnitOfWork를 추가한다.
+
+5-3. AppModule 수정
+     flow-backend/src/app.module.ts를 수정한다.
+     entities 배열에 추가:
+       OutboxMessageSchema -- outbox-message.schema.ts에서 import
+       DeadLetterMessageSchema -- dead-letter-message.schema.ts에서 import
+     migrations 배열에 추가:
+       OutboxAndDlq004 -- 004-outbox-and-dlq.ts에서 import
+
+5-4. WorkflowRuntimeModule 수정
+     flow-backend/src/workflow-runtime/presentation/workflow-runtime.module.ts를 수정한다.
+     UnitOfWork는 SharedModule에서 export되므로 별도 프로바이더 추가 불필요하다.
+     각 유스케이스의 생성자에 UnitOfWork가 추가되었으므로 NestJS DI가 자동 주입한다.
+     SharedModule이 이미 imports에 포함되어 있으므로 배선이 자동으로 연결된다.
+     IMPORTANT: 변경 사항이 없을 수도 있다. typecheck에서 DI 문제가 발견되면 조정한다.
+
+5-5. InMemoryUnitOfWork에 레포지토리 등록
+     InMemoryUnitOfWork가 InMemory 레포지토리들을 스냅샷 대상으로 등록해야 한다.
+     SharedModule이나 WorkflowRuntimeModule의 onModuleInit에서 등록하거나,
+     InMemoryUnitOfWork의 생성자에서 주입받는 방식으로 구현한다.
+     가장 깔끔한 방식:
+       InMemoryUnitOfWork 생성자에 optional으로 InMemorySnapshotRegistry 배열을 받는다
+       SharedModule의 useFactory에서 InMemoryUnitOfWork 생성 시 레포지토리들을 배열로 전달한다
+     대안: ModuleRef를 사용하여 런타임에 등록된 InMemorySnapshotRegistry를 탐색한다.
+     구현 시 프로젝트 규모에 적합한 방식을 선택한다.
+
+5-6. 검증 실행
+     cd flow-backend && npm run typecheck && npm run test && npm run lint
+
+----- Phase 6 통합 검증 -----
+
+6-1. 전체 백엔드 검증 실행
+     cd flow-backend && npm run typecheck && npm run test && npm run lint
+
+6-2. 빌드 검증
+     cd flow-backend && npm run build
+
+6-3. 서버 기동 테스트 -- InMemory 모드
+     cd flow-backend && npm run build && timeout 10 npm run start 또는 서버가 정상 기동되는지 확인
+     NestJS 부팅 로그에서 에러 없이 Application is running 메시지가 나오면 성공
+
+6-4. 기존 테스트 통과 확인
+     cd flow-backend && npm run test
+     기존 SendQueryUseCase.test.ts의 3개 실패는 사전 존재 이슈로 무시한다.
+     그 외 새로운 실패가 없어야 한다.
+
+6-5. 코드 품질 점검
+     - any 타입 사용 여부 확인
+     - 모든 신규 파일이 ESM import 형식인지 확인 -- .js 확장자 포함
+     - Injectable 데코레이터가 필요한 클래스에 적용되었는지 확인
+
+6-6. flow-backend/CLAUDE.md 갱신
+     TCC 전환으로 변경된 아키텍처 규칙을 CLAUDE.md에 반영한다.
+     수정 대상 파일: flow-backend/CLAUDE.md
+
+     6-6-a. 디렉토리 구조 섹션 갱신
+            common/ 하위에 신규 디렉토리/파일을 추가 표기한다:
+              common/ports/unit-of-work.ts -- UnitOfWork 추상 포트
+              common/application/ -- 애플리케이션 공유 유틸리티 디렉토리 추가
+              common/application/compensation-stack.ts -- TCC 보상 스택
+              common/errors/optimistic-lock-error.ts -- 낙관적 잠금 에러
+              common/infra/transactional-event-publisher.ts -- Outbox 연동 이벤트 발행기
+              common/infra/outbox-relay.ts -- Outbox 폴링 릴레이
+              common/infra/dead-letter-queue-service.ts -- DLQ 관리 서비스
+              common/infra/in-memory-outbox.ts -- InMemory Outbox
+              common/infra/in-memory-dead-letter-queue.ts -- InMemory DLQ
+              common/infra/in-memory-unit-of-work.ts -- InMemory UnitOfWork
+              common/infra/typeorm/typeorm-unit-of-work.ts -- TypeORM UnitOfWork
+              common/infra/typeorm/outbox-message.schema.ts -- Outbox 스키마
+              common/infra/typeorm/dead-letter-message.schema.ts -- DLQ 스키마
+
+     6-6-b. Command Use Case 패턴 섹션 갱신 -- 섹션 5-1
+            기존 단순 순차 패턴을 TCC 패턴으로 교체한다.
+            TCC 패턴 설명을 추가한다:
+              TRY -- 입력 검증 그리고 DB 예약. UnitOfWork TX 내에서 도메인 엔티티 저장. 실패 시 TX 자동 롤백.
+              CONFIRM -- 사이드이펙트 실행. CompensationStack에 보상 액션 등록. 최종 상태 TX 저장 그리고 이벤트 발행.
+              CANCEL -- CONFIRM 실패 시 CompensationStack.runAll 호출로 보상 실행. 에러 재던짐.
+            UnitOfWork를 생성자 주입 대상에 추가한다.
+            CompensationStack 사용 예시를 추가한다.
+            코드 예시에서 백틱을 사용하므로 기존 CLAUDE.md 코드 블록 형식을 따른다.
+
+     6-6-c. 에러 계층 섹션 갱신 -- 섹션 6
+            DomainError 하위에 OptimisticLockError를 추가한다:
+              OptimisticLockError -- isTransient: true, 재시도 가능한 동시 수정 충돌 에러
+
+     6-6-d. 도메인 이벤트 섹션 갱신 -- 섹션 7
+            Transactional Outbox 패턴 설명을 추가한다:
+              - 이벤트는 UnitOfWork TX 내에서 outbox 테이블에 기록된다
+              - OutboxRelay가 미발행 이벤트를 폴링하여 핸들러에 전달한다
+              - 핸들러 실패 시 DLQ로 이동한다
+              - InMemory 모드에서는 인메모리 큐로 동일 시맨틱을 보장한다
+
+     6-6-e. 모듈 의존 그래프 갱신 -- 섹션 10
+            SharedModule exports에 UnitOfWork를 추가한다:
+              SharedModule -- Global: EventPublisher, UnitOfWork
+            기존 그래프 구조는 유지한다.
+
+     6-6-f. 금지 사항 섹션 확인
+            기존 금지 사항과 충돌하는 항목이 없는지 확인한다.
+            필요 시 Optimistic Locking 관련 규칙을 추가한다:
+              - 엔티티 저장 시 version 필드 없이 직접 save 호출 금지 -- TypeORM 레포지토리는 반드시 OL 패턴 적용
+
+6-7. 최종 검증
+     cd flow-backend && npm run typecheck && npm run test && npm run lint
+
+----- Phase 7 수동 UI 테스트 실행 -----
+
+이 Phase에서는 실제 서버를 기동하고 Playwright MCP를 사용하여 manual-test-sc/ 의 모든 테스트 시나리오를 실행한다.
+모킹 절대 금지. 실제 InMemory 레포지토리와 실제 서버를 사용하여 모든 테스트를 수행한다.
+스크린샷은 manual-test-sc/screenshots/ 디렉토리에 저장한다.
+
+참조할 테스트 시나리오 파일:
+  - manual-test-sc/git.md -- Git 저장소 관리 도메인
+  - manual-test-sc/mcp-server.md -- MCP 서버 관리 도메인
+  - manual-test-sc/workflow.md -- 워크플로우 정의 도메인
+  - manual-test-sc/workflow-runtime.md -- 워크플로우 실행 런타임 도메인
+  - manual-test-sc/agent-session.md -- 에이전트 세션 관리 도메인
+  - manual-test-sc/integration.md -- 프론트엔드-백엔드 통합 검증
+  - manual-test-sc/workspace.md -- 워크스페이스 관리 도메인
+  - manual-test-sc/work-lineage.md -- 작업 계보 도메인
+  - manual-test-sc/workflow-builder.md -- 워크플로우 빌더 도메인
+  - manual-test-sc/checklist.md -- 마스터 체크리스트
+
+7-1. 서버 기동
+     백엔드 서버를 빌드 후 기동한다:
+       cd flow-backend && npm run build && npm run start
+     서버가 정상 기동되어 localhost:3000에서 응답하는지 확인한다.
+     프론트엔드 dev 서버를 기동한다:
+       cd flow-front && npm run dev
+     localhost:5173에서 페이지가 로드되는지 확인한다.
+
+7-2. Git UI 테스트
+     manual-test-sc/git.md의 모든 TC-GIT 시나리오를 실행한다.
+     Playwright MCP로 localhost:5173 에 접속하여:
+       - Git 목록 페이지 로드 확인
+       - Git 등록 다이얼로그 열기, 입력 검증, 등록 성공 확인
+       - 중복 URL 에러 확인
+       - 삭제 확인 -- 참조 없는 항목과 참조 있는 항목 분리 확인
+       - 페이지 새로고침 후 데이터 유지 확인
+     각 시나리오 완료 후 스크린샷을 manual-test-sc/screenshots/ 에 저장한다.
+
+7-3. MCP Server UI 테스트
+     manual-test-sc/mcp-server.md의 모든 TC-MCP 시나리오를 실행한다.
+     STDIO, SSE, STREAMABLE_HTTP 세 가지 전송 방식 등록을 모두 테스트한다.
+     동적 args/env 필드 추가/삭제를 테스트한다.
+     삭제 시 참조 차단 다이얼로그를 확인한다.
+
+7-4. Workflow UI 테스트
+     manual-test-sc/workflow.md의 모든 TC-WF 시나리오를 실행한다.
+     워크플로우 생성, 편집, 활성화, 비활성화, 삭제를 테스트한다.
+     Git/MCP 참조 드롭다운이 등록된 리소스를 반영하는지 확인한다.
+     Work Definition 순서 변경이 동작하는지 확인한다.
+
+7-5. Workflow Runtime UI 테스트
+     manual-test-sc/workflow-runtime.md의 모든 TC-RT 시나리오를 실행한다.
+     IMPORTANT: 이 테스트가 TCC 전환의 핵심 검증이다.
+     워크플로우 실행 시작, 일시정지, 재개, 취소를 테스트한다.
+     Work Node 편집기에서 태스크 추가/삭제, pauseAfter 토글을 테스트한다.
+     Work Node 추가/삭제를 테스트한다.
+     진행률 표시가 정확한지 확인한다.
+     대시보드 요약 정보가 정확한지 확인한다.
+
+7-6. Workspace UI 테스트
+     manual-test-sc/workspace.md의 모든 TC-WS 시나리오를 실행한다.
+     워크스페이스 생성, 파일 탐색기, 디프 뷰, 완료, 삭제를 테스트한다.
+     SKIP 대상: 실제 에이전트 세션이 필요한 시나리오 -- TC-WS-17, TC-WS-19
+     SKIP 대상: 실제 git remote push가 필요한 시나리오 -- TC-WS-22, TC-WS-23
+
+7-7. Work Lineage UI 테스트
+     manual-test-sc/work-lineage.md의 모든 TC-LIN 시나리오를 실행한다.
+     계보 목록, 확장/축소, 체크박스 선택, 병합 다이얼로그, 마크다운 내보내기를 테스트한다.
+
+7-8. Workflow Builder UI 테스트
+     manual-test-sc/workflow-builder.md의 모든 TC-BLD 시나리오를 실행한다.
+     빌더 목록, 세션 생성, 채팅 레이아웃, 프리뷰 캔버스, 워크플로우 생성을 테스트한다.
+     SKIP 대상: 실제 에이전트 세션이 필요한 시나리오
+
+7-9. Integration 테스트
+     manual-test-sc/integration.md의 모든 TC-INT 시나리오를 실행한다.
+     전체 라이프사이클을 테스트한다 -- Git 등록 --> MCP 등록 --> 워크플로우 생성 --> 활성화 --> 실행
+     사이드바 네비게이션, 크로스 페이지 데이터 일관성, React Query 캐시 무효화를 확인한다.
+
+7-10. 체크리스트 업데이트
+      manual-test-sc/checklist.md를 테스트 결과에 따라 업데이트한다.
+      PASS인 항목은 체크 표시, FAIL인 항목은 체크 해제하고 실패 사유를 기록한다.
+      SKIP 항목은 기존 상태를 유지한다.
+
+----- Phase 8 테스트 실패 수정 루프 -----
+
+Phase 7에서 발견된 실패를 수정하고 재검증하는 루프를 실행한다.
+모킹 절대 금지. 모든 수정은 실제 코드에 적용하고 실제 서버에서 재검증한다.
+
+8-1. 실패 분석
+     Phase 7의 체크리스트에서 FAIL 상태인 항목을 모두 수집한다.
+     FAIL이 0개이면 Phase 8을 즉시 완료하고 최종 검증으로 진행한다.
+     각 실패에 대해 원인을 분석한다:
+       - 스크린샷을 확인하여 UI 상태 파악
+       - 브라우저 콘솔 에러 확인
+       - 서버 로그 확인
+       - 관련 소스 코드 읽기
+
+8-2. 코드 수정
+     분석된 원인에 따라 코드를 수정한다.
+     수정 범위 제한:
+       - TCC 전환 관련 버그이면 해당 유스케이스 수정
+       - 기존 로직 버그이면 해당 레이어 수정
+       - 프론트엔드 UI 버그이면 프론트엔드 수정
+     수정 시 도메인 엔티티의 상태 전이 로직은 변경하지 않는다.
+
+8-3. 코드 검증
+     수정 후 백엔드 그리고 프론트엔드 검증을 실행한다.
+     cd flow-backend && npm run typecheck && npm run test && npm run lint
+     cd flow-front && npx tsc -b && npm run lint && npm run build
+     검증 실패 시 수정 후 재검증한다.
+
+8-4. 서버 재기동
+     코드가 변경되었으면 백엔드 서버를 재빌드 후 재기동한다.
+     cd flow-backend && npm run build && npm run start
+     프론트엔드는 dev 서버가 HMR로 자동 반영되므로 재기동 불필요하다.
+
+8-5. 실패 시나리오 재실행
+     8-1에서 수집한 FAIL 항목만 Playwright MCP로 재실행한다.
+     PASS로 전환되면 체크리스트를 업데이트한다.
+     여전히 FAIL이면 8-1로 돌아가 원인을 재분석한다.
+
+8-6. 루프 종료 조건
+     모든 FAIL 항목이 PASS 또는 SKIP으로 전환되면 루프를 종료한다.
+     SKIP 항목은 실제 에이전트 세션이나 외부 시스템이 필요한 경우에만 허용한다.
+     루프 종료 후 최종 검증을 실행한다:
+     cd flow-backend && npm run typecheck && npm run test && npm run lint
+     cd flow-front && npx tsc -b && npm run lint && npm run build
+
+모든 Phase가 완료되고, 전체 수동 테스트가 통과하고, 코드 검증이 통과하면 TCC PATTERN MIGRATION COMPLETE 를 출력한다.

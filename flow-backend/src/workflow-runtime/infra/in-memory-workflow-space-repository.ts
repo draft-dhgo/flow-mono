@@ -1,9 +1,21 @@
 import type { WorkflowSpace } from '../domain/entities/workflow-space.js';
 import type { WorkflowSpaceId, WorkflowRunId } from '../domain/value-objects/index.js';
 import { WorkflowSpaceRepository } from '../domain/ports/workflow-space-repository.js';
+import type { InMemorySnapshotRegistry } from '@common/infra/in-memory-unit-of-work.js';
 
-export class InMemoryWorkflowSpaceRepository extends WorkflowSpaceRepository {
+export class InMemoryWorkflowSpaceRepository extends WorkflowSpaceRepository implements InMemorySnapshotRegistry {
   private readonly store = new Map<WorkflowSpaceId, WorkflowSpace>();
+
+  snapshot(): Map<unknown, unknown> {
+    return new Map(this.store);
+  }
+
+  restore(snap: Map<unknown, unknown>): void {
+    this.store.clear();
+    for (const [k, v] of snap) {
+      this.store.set(k as WorkflowSpaceId, v as WorkflowSpace);
+    }
+  }
 
   async findById(id: WorkflowSpaceId): Promise<WorkflowSpace | null> {
     return this.store.get(id) ?? null;

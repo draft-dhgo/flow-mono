@@ -159,6 +159,7 @@ export class CreateWorkflowUseCase {
 - 반드시 상태를 변경한다 (Create, Update, Delete, 상태 전이 등)
 - 도메인 이벤트를 발행한다
 - 네이밍: `{동사}{엔티티}UseCase` (예: `CreateWorkflowUseCase`, `DeleteGitUseCase`)
+- workflow-runtime의 Command Use Case는 **TCC 패턴**을 따른다 (→ 규칙 14 참고)
 
 #### 5-2. Query Use Case (읽기 전용)
 
@@ -297,7 +298,7 @@ export class WorkflowModule {}
 현재 모듈 의존 관계:
 
 ```
-SharedModule (@Global: EventPublisher)
+SharedModule (@Global: EventPublisher, UnitOfWork)
     ↑
 GitModule        → exports [GitReferenceChecker]
 McpModule        → exports [McpServerReferenceChecker, McpServerReader]
@@ -353,6 +354,87 @@ start(): void {
 ```
 
 허용되지 않은 상태 전이는 `InvalidStateTransitionError`로 거부한다.
+
+### 14. TCC (Try-Confirm-Cancel) 트랜잭션 패턴
+
+workflow-runtime의 Command Use Case는 TCC 구조로 작성한다.
+
+```typescript
+@Injectable()
+export class SomeUseCase {
+  constructor(
+    private readonly repo: SomeRepository,
+    private readonly eventPublisher: EventPublisher,
+    private readonly unitOfWork: UnitOfWork,  // 마지막 의존성
+  ) {}
+
+  async execute(command: SomeCommand): Promise<SomeResult> {
+    // ── TRY ──────────────────────────────────
+    // 검증, 엔티티 로드/생성, 선행 조건 확인
+    const entity = await this.repo.findById(command.id);
+    if (!entity) throw new NotFoundError(...);
+
+    // ── CONFIRM ──────────────────────────────
+    const compensations = new CompensationStack();
+    try {
+      // 부수 효과 (파일 I/O, 외부 서비스 호출)
+      // 각 부수 효과에 대해 compensation 등록
+      compensations.push(async () => { /* 롤백 로직 */ });
+
+      // 상태 전이 + 트랜잭션 저장
+      entity.doSomething();
+      await this.unitOfWork.run(async () => {
+        await this.repo.save(entity);
+        const events = entity.clearDomainEvents();
+        await this.eventPublisher.publishAll(events);
+      });
+
+      return { /* 결과 */ };
+    } catch (err: unknown) {
+      // ── CANCEL ─────────────────────────────
+      await compensations.runAll();
+      throw err;
+    }
+  }
+}
+```
+
+**핵심 원칙:**
+- **TRY:** 검증 + 준비 (부수 효과 없음)
+- **CONFIRM:** `unitOfWork.run()` 내에서 저장 + 이벤트 발행 (원자적 커밋)
+- **CANCEL:** `CompensationStack`으로 LIFO 순서 롤백 (에러 내성)
+- `UnitOfWork`는 항상 생성자의 마지막 파라미터로 주입
+- DB 모드: `TypeOrmUnitOfWork` (QueryRunner 트랜잭션)
+- InMemory 모드: `InMemoryUnitOfWork` (snapshot/restore 롤백)
+
+### 15. Optimistic Locking
+
+TypeORM 리포지토리는 version 기반 Optimistic Locking을 사용한다:
+
+```typescript
+if (entity.version > 1) {
+  const result = await this.repo.createQueryBuilder().update()
+    .set(row as unknown as Record<string, unknown>)
+    .where('id = :id AND version = :version', { id: row.id, version: entity.version - 1 })
+    .execute();
+  if (result.affected === 0) throw new OptimisticLockError('Entity', row.id);
+} else {
+  await this.repo.save(row);
+}
+```
+
+- `OptimisticLockError`는 `DomainError` (isTransient=true) — 파이프라인이 자동 재시도
+- 모든 Aggregate Root 엔티티에 `version` 필드 필수
+
+### 16. Transactional Outbox & Dead Letter Queue
+
+이벤트 발행의 신뢰성을 보장하기 위해 Transactional Outbox 패턴을 사용한다:
+
+- **TransactionalEventPublisher:** outbox 테이블에 기록 + inner publisher로 즉시 디스패치
+- **OutboxRelay:** 5초 주기로 미발행 outbox 메시지를 폴링하여 재전송 (최대 5회)
+- **DeadLetterQueue:** 재시도 초과 실패 메시지를 DLQ로 이동
+- InMemory 모드: `InMemoryOutbox`, `InMemoryDeadLetterQueue` 사용
+- DB 모드: `outbox_messages`, `dead_letter_messages` 테이블 사용
 
 ## 금지 사항
 

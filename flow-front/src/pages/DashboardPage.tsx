@@ -9,6 +9,7 @@ import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { useWorkflowRunList } from '@/hooks/useWorkflowRuns';
+import { SUMMARY_CARD_COLOR } from '@/lib/constants';
 import type { WorkflowRunListItem } from '@/api/types';
 import {
   Play,
@@ -21,21 +22,11 @@ import {
 } from 'lucide-react';
 
 const summaryCards = [
-  { key: 'running' as const, label: '실행 중', color: 'text-green-600', icon: Play },
-  { key: 'paused' as const, label: '일시정지', color: 'text-yellow-600', icon: Pause },
-  { key: 'awaiting' as const, label: '대기 중', color: 'text-orange-600', icon: Clock },
-  {
-    key: 'completed' as const,
-    label: '완료',
-    color: 'text-blue-600',
-    icon: CheckCircle,
-  },
-  {
-    key: 'cancelled' as const,
-    label: '취소',
-    color: 'text-red-600',
-    icon: XCircle,
-  },
+  { key: 'running' as const, label: '실행 중', icon: Play },
+  { key: 'paused' as const, label: '일시정지', icon: Pause },
+  { key: 'awaiting' as const, label: '대기 중', icon: Clock },
+  { key: 'completed' as const, label: '완료', icon: CheckCircle },
+  { key: 'cancelled' as const, label: '취소', icon: XCircle },
 ];
 
 export function DashboardPage() {
@@ -161,10 +152,10 @@ export function DashboardPage() {
         <CardSkeleton count={5} />
       ) : (
         <div className="grid grid-cols-5 gap-4 mb-6">
-          {summaryCards.map(({ key, label, color, icon: Icon }) => (
+          {summaryCards.map(({ key, label, icon: Icon }) => (
             <Card key={key}>
               <CardContent className="p-4 flex items-center gap-3">
-                <Icon className={`h-8 w-8 ${color}`} />
+                <Icon className={`h-8 w-8 ${SUMMARY_CARD_COLOR[key]}`} />
                 <div>
                   <p className="text-2xl font-bold">{summary?.[key] ?? 0}</p>
                   <p className="text-sm text-muted-foreground">{label}</p>

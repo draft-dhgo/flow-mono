@@ -1,6 +1,5 @@
 import { useState, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { useQueryClient } from '@tanstack/react-query';
 import { PageHeader } from '@/components/layout/PageHeader';
 import { DataTable, type Column } from '@/components/DataTable';
 import { StatusBadge } from '@/components/StatusBadge';
@@ -16,8 +15,6 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { useWorkflows } from '@/hooks/useWorkflows';
-import { workflowsApi } from '@/api/workflows';
-import { queryKeys } from '@/lib/query-keys';
 import type { WorkflowListItem } from '@/api/types';
 import {
   Plus,
@@ -31,21 +28,20 @@ import {
 
 export function WorkflowListPage() {
   const navigate = useNavigate();
-  const queryClient = useQueryClient();
   const {
     listQuery,
     activateMutation,
     deactivateMutation,
     deleteMutation,
     startRunMutation,
+    bulkDeleteMutation,
   } = useWorkflows();
   const [deleteTarget, setDeleteTarget] = useState<WorkflowListItem | null>(null);
   const [runTarget, setRunTarget] = useState<WorkflowListItem | null>(null);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [bulkDeleteOpen, setBulkDeleteOpen] = useState(false);
-  const [bulkDeleting, setBulkDeleting] = useState(false);
 
-  const data = listQuery.data ?? [];
+  const data = useMemo(() => listQuery.data ?? [], [listQuery.data]);
   const draftIds = useMemo(
     () => new Set(data.filter((w) => w.status === 'DRAFT').map((w) => w.id)),
     [data],
@@ -80,16 +76,13 @@ export function WorkflowListPage() {
     });
   };
 
-  const handleBulkDelete = async () => {
-    setBulkDeleting(true);
-    try {
-      await Promise.all([...selectedIds].map((id) => workflowsApi.delete(id)));
-      setSelectedIds(new Set());
-      setBulkDeleteOpen(false);
-      queryClient.invalidateQueries({ queryKey: queryKeys.workflows.all });
-    } finally {
-      setBulkDeleting(false);
-    }
+  const handleBulkDelete = () => {
+    bulkDeleteMutation.mutate([...selectedIds], {
+      onSuccess: () => {
+        setSelectedIds(new Set());
+        setBulkDeleteOpen(false);
+      },
+    });
   };
 
   const allChecked = draftIds.size > 0 && selectedIds.size === draftIds.size;
@@ -245,7 +238,7 @@ export function WorkflowListPage() {
         confirmLabel="삭제"
         destructive
         onConfirm={handleBulkDelete}
-        loading={bulkDeleting}
+        loading={bulkDeleteMutation.isPending}
       />
 
       <IssueKeyDialog

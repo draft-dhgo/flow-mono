@@ -1,16 +1,32 @@
+import { Logger } from '@nestjs/common';
 import type { DomainEvent } from '../events/domain-event.js';
 import type { EventHandler } from '../ports/event-publisher.js';
 import { EventPublisher } from '../ports/event-publisher.js';
 
+export type HandlerErrorCallback = (event: DomainEvent, handlerName: string, error: unknown) => void;
+
 export class InMemoryEventPublisher extends EventPublisher {
+  private readonly logger = new Logger(InMemoryEventPublisher.name);
   private readonly handlers = new Map<string, EventHandler[]>();
   private readonly publishedEvents: DomainEvent[] = [];
+  private errorCallback: HandlerErrorCallback | null = null;
+
+  setErrorCallback(callback: HandlerErrorCallback): void {
+    this.errorCallback = callback;
+  }
 
   async publish(event: DomainEvent): Promise<void> {
     this.publishedEvents.push(event);
     const handlers = this.handlers.get(event.eventType) ?? [];
     for (const handler of handlers) {
-      await handler(event);
+      try {
+        await handler(event);
+      } catch (err: unknown) {
+        this.logger.error(`Handler execution failed for ${event.eventType}: ${(err as Error).message}`);
+        if (this.errorCallback) {
+          this.errorCallback(event, handler.name || 'anonymous', err);
+        }
+      }
     }
   }
 

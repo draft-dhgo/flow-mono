@@ -1,4 +1,5 @@
 export { EventPublisher } from './event-publisher.js';
+export { UnitOfWork } from './unit-of-work.js';
 export type { EventHandler } from './event-publisher.js';
 export { WorkflowConfigReader } from './workflow-config-reader.js';
 export type {

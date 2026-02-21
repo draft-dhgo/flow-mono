@@ -27,11 +27,14 @@ import { CheckpointSchema } from './workflow-runtime/infra/typeorm/checkpoint.sc
 import { WorkTreeSchema } from './workflow-runtime/infra/typeorm/work-tree.schema.js';
 import { WorkflowSpaceSchema } from './workflow-runtime/infra/typeorm/workflow-space.schema.js';
 import { DomainEventSchema } from './common/infra/typeorm/domain-event.schema.js';
+import { OutboxMessageSchema } from './common/infra/typeorm/outbox-message.schema.js';
+import { DeadLetterMessageSchema } from './common/infra/typeorm/dead-letter-message.schema.js';
 
 // Migration
 import { Initial001 } from './common/infra/typeorm/migrations/001-initial.js';
 import { DomainEvents002 } from './common/infra/typeorm/migrations/002-domain-events.js';
 import { SchemaSync003 } from './common/infra/typeorm/migrations/003-schema-sync.js';
+import { OutboxAndDlq004 } from './common/infra/typeorm/migrations/004-outbox-and-dlq.js';
 
 const featureModules = [
   ThrottlerModule.forRoot([{ ttl: 60_000, limit: 100 }]),
@@ -62,8 +65,10 @@ function buildTypeOrmModule(): DynamicModule {
       WorkTreeSchema,
       WorkflowSpaceSchema,
       DomainEventSchema,
+      OutboxMessageSchema,
+      DeadLetterMessageSchema,
     ],
-    migrations: [Initial001, DomainEvents002, SchemaSync003],
+    migrations: [Initial001, DomainEvents002, SchemaSync003, OutboxAndDlq004],
   });
 }
 

@@ -1,9 +1,21 @@
 import type { WorkTree } from '../domain/entities/work-tree.js';
 import type { WorkTreeId, WorkflowRunId } from '../domain/value-objects/index.js';
 import { WorkTreeRepository } from '../domain/ports/work-tree-repository.js';
+import type { InMemorySnapshotRegistry } from '@common/infra/in-memory-unit-of-work.js';
 
-export class InMemoryWorkTreeRepository extends WorkTreeRepository {
+export class InMemoryWorkTreeRepository extends WorkTreeRepository implements InMemorySnapshotRegistry {
   private readonly store = new Map<WorkTreeId, WorkTree>();
+
+  snapshot(): Map<unknown, unknown> {
+    return new Map(this.store);
+  }
+
+  restore(snap: Map<unknown, unknown>): void {
+    this.store.clear();
+    for (const [k, v] of snap) {
+      this.store.set(k as WorkTreeId, v as WorkTree);
+    }
+  }
 
   async findById(id: WorkTreeId): Promise<WorkTree | null> {
     return this.store.get(id) ?? null;
