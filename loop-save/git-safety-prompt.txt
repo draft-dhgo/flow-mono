@@ -1,0 +1,247 @@
+Git 조작 안전장치를 구축하고, 이후 기능(작업 리니지, 애드혹 워크스페이스, 브랜치 통합)에 필요한 git 메서드를 추가한다.
+flow-front/CLAUDE.md와 flow-backend/CLAUDE.md의 모든 규칙을 준수한다.
+
+핵심 원칙:
+  1. 에이전트가 생성하는 모든 worktree에 pre-push hook을 설치하여 git push를 차단한다.
+  2. 새 브랜치는 절대 원격 upstream 트래킹을 설정하지 않는다.
+  3. 원격 푸시는 사용자의 명시적 요청에 의해서만, 프로그래밍적으로 수행한다.
+  4. 모든 git 조작은 GitClient/GitService 포트를 통해서만 수행한다.
+
+수정할 항목 목록:
+  A1. GitClient 포트에 push, installPrePushHook, unsetUpstream, getCommitCount, getLog, diff, getFileAtRef, merge 메서드 추가
+  A2. CliGitClient 구현체에 모든 메서드 구현
+  B1. GitService 포트에 동일 메서드 추가
+  B2. GitServiceImpl 어댑터에 구현
+  C1. StartWorkflowRunUseCase에서 worktree 생성 후 pre-push hook 설치 + upstream 해제
+
+아래 3개 Phase를 순서대로 진행한다.
+각 Phase 완료 후 반드시 아래 검증을 실행한다. 검증 실패 시 수정 후 다시 검증한다.
+  백엔드 검증: cd flow-backend && npm run typecheck && npm run test && npm run lint
+
+
+----- Phase 1 GitClient 포트 + CliGitClient 구현 -- A1, A2 -----
+
+핵심 파일:
+  - flow-backend/src/git/domain/ports/git-client.ts -- 수정
+  - flow-backend/src/git/infra/cli-git-client.ts -- 수정
+참조할 코드 -- 읽기만, 수정하지 않음:
+  - flow-backend/src/git/infra/cli-git-client.ts -- 기존 exec 패턴 참조
+
+1-1. GitClient 포트에 메서드 추가 -- flow-backend/src/git/domain/ports/git-client.ts
+
+     기존 abstract 메서드 목록 아래에 다음 메서드를 추가:
+
+     A. abstract push -- repoPath: string, branch: string -- returns Promise<void>
+        원격 저장소로 특정 브랜치를 푸시한다.
+
+     B. abstract installPrePushHook -- worktreePath: string -- returns Promise<void>
+        worktree의 .git/hooks/pre-push 파일에 push를 거부하는 스크립트를 설치한다.
+
+     C. abstract unsetUpstream -- repoPath: string, branch: string -- returns Promise<void>
+        브랜치의 upstream 트래킹을 해제한다.
+
+     D. abstract getCommitCount -- repoPath: string, baseBranch: string -- returns Promise<number>
+        baseBranch 대비 현재 브랜치의 커밋 수를 반환한다.
+
+     E. abstract getLog -- repoPath: string, baseBranch: string, maxCount: number -- returns Promise<GitLogEntry 배열>
+        baseBranch 이후의 커밋 로그를 반환한다.
+
+     F. abstract diff -- repoPath: string, baseBranch: string -- returns Promise<string 배열>
+        baseBranch 대비 변경된 파일 경로 목록을 반환한다.
+
+     G. abstract getFileAtRef -- repoPath: string, ref: string, filePath: string -- returns Promise<string>
+        특정 ref(브랜치/커밋)의 파일 내용을 반환한다.
+
+     H. abstract merge -- repoPath: string, branch: string -- returns Promise<void>
+        지정된 브랜치를 현재 브랜치로 머지한다.
+
+     GitLogEntry 인터페이스를 같은 파일 상단에 추가:
+       export interface GitLogEntry:
+         hash -- string
+         message -- string
+         author -- string
+         date -- string
+
+1-2. CliGitClient 구현체에 메서드 구현 -- flow-backend/src/git/infra/cli-git-client.ts
+
+     기존 private exec 메서드와 동일한 패턴으로 구현한다.
+
+     A. async push 구현:
+        await this.exec(repoPath, ['push', 'origin', '--', branch])
+
+     B. async installPrePushHook 구현:
+        import: writeFile, mkdir from node:fs/promises
+        import: join from node:path
+
+        worktree의 git dir 경로를 찾기:
+          const gitDirContent = await readFile(join(worktreePath, '.git'), 'utf-8')
+          -- worktree의 .git은 파일이다: "gitdir: /path/to/main/.git/worktrees/xxx" 형식
+          const gitDir = gitDirContent.replace('gitdir: ', '').trim()
+          만약 gitDirContent가 'gitdir:'로 시작하지 않으면:
+            -- 일반 .git 디렉토리인 경우
+            gitDir = join(worktreePath, '.git')
+
+        hooks 디렉토리 생성:
+          const hooksDir = join(gitDir, 'hooks')
+          await mkdir(hooksDir, { recursive: true })
+
+        pre-push hook 파일 생성:
+          const hookPath = join(hooksDir, 'pre-push')
+          const hookContent = [
+            '#!/bin/sh',
+            '# FlowFlow: 에이전트의 원격 푸시를 차단합니다.',
+            'echo "ERROR: 원격 푸시가 차단되었습니다. FlowFlow UI를 통해 푸시하세요." >&2',
+            'exit 1',
+          ].join('\n')
+          await writeFile(hookPath, hookContent, { mode: 0o755 })
+
+        import 추가: readFile from node:fs/promises -- 기존 rm import에 합침
+        import 추가: join from node:path -- 기존 resolve import에 합침
+
+     C. async unsetUpstream 구현:
+        try 블록:
+          await this.exec(repoPath, ['branch', '--unset-upstream', '--', branch])
+        catch 블록:
+          무시 -- upstream이 설정되지 않은 경우 에러 발생, 정상 동작
+
+     D. async getCommitCount 구현:
+        const output = await this.exec(repoPath, ['rev-list', '--count', baseBranch + '..HEAD'])
+        return parseInt(output.trim(), 10)
+
+     E. async getLog 구현:
+        const format = '--format=%H|||%s|||%an|||%aI'
+        const output = await this.exec(repoPath, ['log', format, baseBranch + '..HEAD', '-n', String(maxCount)])
+        const lines = output.trim().split('\n').filter(Boolean)
+        return lines.map(line => {
+          const parts = line.split('|||')
+          return {
+            hash: parts[0] ?? '',
+            message: parts[1] ?? '',
+            author: parts[2] ?? '',
+            date: parts[3] ?? '',
+          }
+        })
+        import: GitLogEntry from 포트 -- 기존 import에 타입 추가
+
+     F. async diff 구현:
+        const output = await this.exec(repoPath, ['diff', '--name-only', baseBranch + '...HEAD'])
+        return output.trim().split('\n').filter(Boolean)
+
+     G. async getFileAtRef 구현:
+        const output = await this.exec(repoPath, ['show', ref + ':' + filePath])
+        return output
+
+     H. async merge 구현:
+        await this.exec(repoPath, ['merge', '--no-edit', '--', branch])
+
+1-3. 백엔드 검증 실행
+
+
+----- Phase 2 GitService 포트 + GitServiceImpl -- B1, B2 -----
+
+핵심 파일:
+  - flow-backend/src/common/ports/git-service.ts -- 수정
+  - flow-backend/src/git/infra/git-service-impl.ts -- 수정
+참조할 코드 -- 읽기만, 수정하지 않음:
+  - flow-backend/src/git/domain/ports/git-client.ts -- 새로 추가한 메서드 시그니처
+
+2-1. GitService 포트에 메서드 추가 -- flow-backend/src/common/ports/git-service.ts
+
+     GitLogEntry를 re-export:
+       export type { GitLogEntry } from '../../git/domain/ports/git-client.js'
+       또는 GitService 파일 상단에 import type { GitLogEntry } 후 re-export
+
+     기존 abstract 메서드 아래에 추가:
+
+     abstract push -- repoPath: string, branch: string -- returns Promise<void>
+     abstract installPrePushHook -- worktreePath: string -- returns Promise<void>
+     abstract unsetUpstream -- repoPath: string, branch: string -- returns Promise<void>
+     abstract getCommitCount -- repoPath: string, baseBranch: string -- returns Promise<number>
+     abstract getLog -- repoPath: string, baseBranch: string, maxCount: number -- returns Promise<GitLogEntry 배열>
+     abstract diff -- repoPath: string, baseBranch: string -- returns Promise<string 배열>
+     abstract getFileAtRef -- repoPath: string, ref: string, filePath: string -- returns Promise<string>
+     abstract merge -- repoPath: string, branch: string -- returns Promise<void>
+
+2-2. GitServiceImpl 어댑터에 구현 -- flow-backend/src/git/infra/git-service-impl.ts
+
+     기존 위임 패턴과 동일:
+
+     async push(repoPath: string, branch: string): Promise<void> {
+       await this.gitClient.push(repoPath, branch);
+     }
+
+     async installPrePushHook(worktreePath: string): Promise<void> {
+       await this.gitClient.installPrePushHook(worktreePath);
+     }
+
+     async unsetUpstream(repoPath: string, branch: string): Promise<void> {
+       await this.gitClient.unsetUpstream(repoPath, branch);
+     }
+
+     async getCommitCount(repoPath: string, baseBranch: string): Promise<number> {
+       return this.gitClient.getCommitCount(repoPath, baseBranch);
+     }
+
+     async getLog(repoPath: string, baseBranch: string, maxCount: number): Promise<GitLogEntry[]> {
+       return this.gitClient.getLog(repoPath, baseBranch, maxCount);
+     }
+
+     async diff(repoPath: string, baseBranch: string): Promise<string[]> {
+       return this.gitClient.diff(repoPath, baseBranch);
+     }
+
+     async getFileAtRef(repoPath: string, ref: string, filePath: string): Promise<string> {
+       return this.gitClient.getFileAtRef(repoPath, ref, filePath);
+     }
+
+     async merge(repoPath: string, branch: string): Promise<void> {
+       await this.gitClient.merge(repoPath, branch);
+     }
+
+     import에 GitLogEntry 타입 추가.
+
+2-3. common/ports/index.ts에 GitLogEntry export가 포함되는지 확인. 필요하면 추가.
+
+2-4. 백엔드 검증 실행
+
+
+----- Phase 3 StartWorkflowRunUseCase 통합 -- C1 -----
+
+핵심 파일:
+  - flow-backend/src/workflow-runtime/application/commands/start-workflow-run-use-case.ts -- 수정
+참조할 코드 -- 읽기만, 수정하지 않음:
+  - flow-backend/src/git/infra/cli-git-client.ts -- hook 설치 동작 확인
+
+3-1. StartWorkflowRunUseCase 수정
+
+     execute 메서드에서 각 gitRef에 대한 worktree 생성 부분을 찾는다.
+     기존 코드:
+       await this.gitService.createWorktree({ ... });
+       const workTree = WorkTree.create({ ... });
+       await this.workTreeRepository.save(workTree);
+
+     createWorktree 호출 직후, WorkTree.create 전에 다음 두 줄을 추가:
+
+       // 에이전트의 원격 푸시 차단
+       await this.gitService.installPrePushHook(workTreePath);
+       // upstream 트래킹 해제 -- 새 브랜치가 원격 베이스를 추적하지 않도록
+       await this.gitService.unsetUpstream(workTreePath, resolvedBranchName);
+
+     주의:
+       - installPrePushHook에는 worktree 경로(workTreePath)를 전달
+       - unsetUpstream에는 worktree 경로와 브랜치명을 전달
+       - gitService.createWorktree의 baseBranch 옵션 때문에 git이 자동으로 upstream을 설정할 수 있으므로 반드시 해제
+
+3-2. 백엔드 검증 실행
+
+3-3. 통합 검증:
+     1. 워크플로우 런을 시작한다.
+     2. 생성된 worktree 경로에서 pre-push hook 파일이 존재하는지 확인:
+        worktree 경로의 .git 파일을 읽어 gitdir 경로를 확인하고,
+        해당 경로의 hooks/pre-push 파일이 있는지 확인.
+     3. git config --get branch.{branchName}.remote 가 빈 값인지 확인.
+
+3-4. 최종 백엔드 검증:
+     cd flow-backend && npm run typecheck && npm run test && npm run lint
+
+GIT SAFETY + EXTENDED GIT METHODS COMPLETE 를 출력한다.

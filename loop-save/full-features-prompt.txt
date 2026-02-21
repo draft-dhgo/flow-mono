@@ -1,0 +1,2758 @@
+Git 안전장치 구축, 작업 리니지 테이블, 애드혹 워크스페이스(채팅 + 모나코 diff), 브랜치 통합 + 선택적 원격 푸시, 대화형 워크플로우 빌더를 순차적으로 구현한다.
+flow-front/CLAUDE.md와 flow-backend/CLAUDE.md의 모든 규칙을 준수한다.
+
+총 25개 Phase를 순서대로 진행한다.
+각 Phase 완료 후 반드시 아래 검증을 실행한다. 검증 실패 시 수정 후 다시 검증한다.
+  백엔드 검증: cd flow-backend && npm run typecheck && npm run test && npm run lint
+  프론트엔드 검증: cd flow-front && npx tsc -b && npm run lint && npm run build
+프론트엔드 Phase 완료 후 Playwright MCP를 통해 localhost:5173에 접속하여 실제 화면을 확인하고 문제가 있으면 즉시 수정한다.
+
+
+========================================================
+=== 파트 A: Git 안전장치 + 확장 Git 메서드 (Phase 1~3) ===
+========================================================
+
+핵심 원칙:
+  1. 에이전트가 생성하는 모든 worktree에 pre-push hook을 설치하여 git push를 차단한다.
+  2. 새 브랜치는 절대 원격 upstream 트래킹을 설정하지 않는다.
+  3. 원격 푸시는 사용자의 명시적 요청에 의해서만, 프로그래밍적으로 수행한다.
+  4. 모든 git 조작은 GitClient/GitService 포트를 통해서만 수행한다.
+
+수정할 항목 목록:
+  A1. GitClient 포트에 push, installPrePushHook, unsetUpstream, getCommitCount, getLog, diff, getFileAtRef, merge 메서드 추가
+  A2. CliGitClient 구현체에 모든 메서드 구현
+  B1. GitService 포트에 동일 메서드 추가
+  B2. GitServiceImpl 어댑터에 구현
+  C1. StartWorkflowRunUseCase에서 worktree 생성 후 pre-push hook 설치 + upstream 해제
+
+
+----- Phase 1 GitClient 포트 + CliGitClient 구현 -- A1, A2 -----
+
+핵심 파일:
+  - flow-backend/src/git/domain/ports/git-client.ts -- 수정
+  - flow-backend/src/git/infra/cli-git-client.ts -- 수정
+참조할 코드 -- 읽기만, 수정하지 않음:
+  - flow-backend/src/git/infra/cli-git-client.ts -- 기존 exec 패턴 참조
+
+1-1. GitClient 포트에 메서드 추가 -- flow-backend/src/git/domain/ports/git-client.ts
+
+     기존 abstract 메서드 목록 아래에 다음 메서드를 추가:
+
+     A. abstract push -- repoPath: string, branch: string -- returns Promise<void>
+        원격 저장소로 특정 브랜치를 푸시한다.
+
+     B. abstract installPrePushHook -- worktreePath: string -- returns Promise<void>
+        worktree의 .git/hooks/pre-push 파일에 push를 거부하는 스크립트를 설치한다.
+
+     C. abstract unsetUpstream -- repoPath: string, branch: string -- returns Promise<void>
+        브랜치의 upstream 트래킹을 해제한다.
+
+     D. abstract getCommitCount -- repoPath: string, baseBranch: string -- returns Promise<number>
+        baseBranch 대비 현재 브랜치의 커밋 수를 반환한다.
+
+     E. abstract getLog -- repoPath: string, baseBranch: string, maxCount: number -- returns Promise<GitLogEntry 배열>
+        baseBranch 이후의 커밋 로그를 반환한다.
+
+     F. abstract diff -- repoPath: string, baseBranch: string -- returns Promise<string 배열>
+        baseBranch 대비 변경된 파일 경로 목록을 반환한다.
+
+     G. abstract getFileAtRef -- repoPath: string, ref: string, filePath: string -- returns Promise<string>
+        특정 ref(브랜치/커밋)의 파일 내용을 반환한다.
+
+     H. abstract merge -- repoPath: string, branch: string -- returns Promise<void>
+        지정된 브랜치를 현재 브랜치로 머지한다.
+
+     GitLogEntry 인터페이스를 같은 파일 상단에 추가:
+       export interface GitLogEntry:
+         hash -- string
+         message -- string
+         author -- string
+         date -- string
+
+1-2. CliGitClient 구현체에 메서드 구현 -- flow-backend/src/git/infra/cli-git-client.ts
+
+     기존 private exec 메서드와 동일한 패턴으로 구현한다.
+
+     A. async push 구현:
+        await this.exec(repoPath, ['push', 'origin', '--', branch])
+
+     B. async installPrePushHook 구현:
+        import: writeFile, mkdir from node:fs/promises
+        import: join from node:path
+
+        worktree의 git dir 경로를 찾기:
+          const gitDirContent = await readFile(join(worktreePath, '.git'), 'utf-8')
+          -- worktree의 .git은 파일이다: "gitdir: /path/to/main/.git/worktrees/xxx" 형식
+          const gitDir = gitDirContent.replace('gitdir: ', '').trim()
+          만약 gitDirContent가 'gitdir:'로 시작하지 않으면:
+            -- 일반 .git 디렉토리인 경우
+            gitDir = join(worktreePath, '.git')
+
+        hooks 디렉토리 생성:
+          const hooksDir = join(gitDir, 'hooks')
+          await mkdir(hooksDir, { recursive: true })
+
+        pre-push hook 파일 생성:
+          const hookPath = join(hooksDir, 'pre-push')
+          const hookContent = [
+            '#!/bin/sh',
+            '# FlowFlow: 에이전트의 원격 푸시를 차단합니다.',
+            'echo "ERROR: 원격 푸시가 차단되었습니다. FlowFlow UI를 통해 푸시하세요." >&2',
+            'exit 1',
+          ].join('\n')
+          await writeFile(hookPath, hookContent, { mode: 0o755 })
+
+        import 추가: readFile from node:fs/promises -- 기존 rm import에 합침
+        import 추가: join from node:path -- 기존 resolve import에 합침
+
+     C. async unsetUpstream 구현:
+        try 블록:
+          await this.exec(repoPath, ['branch', '--unset-upstream', '--', branch])
+        catch 블록:
+          무시 -- upstream이 설정되지 않은 경우 에러 발생, 정상 동작
+
+     D. async getCommitCount 구현:
+        const output = await this.exec(repoPath, ['rev-list', '--count', baseBranch + '..HEAD'])
+        return parseInt(output.trim(), 10)
+
+     E. async getLog 구현:
+        const format = '--format=%H|||%s|||%an|||%aI'
+        const output = await this.exec(repoPath, ['log', format, baseBranch + '..HEAD', '-n', String(maxCount)])
+        const lines = output.trim().split('\n').filter(Boolean)
+        return lines.map(line => {
+          const parts = line.split('|||')
+          return {
+            hash: parts[0] ?? '',
+            message: parts[1] ?? '',
+            author: parts[2] ?? '',
+            date: parts[3] ?? '',
+          }
+        })
+        import: GitLogEntry from 포트 -- 기존 import에 타입 추가
+
+     F. async diff 구현:
+        const output = await this.exec(repoPath, ['diff', '--name-only', baseBranch + '...HEAD'])
+        return output.trim().split('\n').filter(Boolean)
+
+     G. async getFileAtRef 구현:
+        const output = await this.exec(repoPath, ['show', ref + ':' + filePath])
+        return output
+
+     H. async merge 구현:
+        await this.exec(repoPath, ['merge', '--no-edit', '--', branch])
+
+1-3. 백엔드 검증 실행
+
+
+----- Phase 2 GitService 포트 + GitServiceImpl -- B1, B2 -----
+
+핵심 파일:
+  - flow-backend/src/common/ports/git-service.ts -- 수정
+  - flow-backend/src/git/infra/git-service-impl.ts -- 수정
+참조할 코드 -- 읽기만, 수정하지 않음:
+  - flow-backend/src/git/domain/ports/git-client.ts -- 새로 추가한 메서드 시그니처
+
+2-1. GitService 포트에 메서드 추가 -- flow-backend/src/common/ports/git-service.ts
+
+     GitLogEntry를 re-export:
+       export type { GitLogEntry } from '../../git/domain/ports/git-client.js'
+       또는 GitService 파일 상단에 import type { GitLogEntry } 후 re-export
+
+     기존 abstract 메서드 아래에 추가:
+
+     abstract push -- repoPath: string, branch: string -- returns Promise<void>
+     abstract installPrePushHook -- worktreePath: string -- returns Promise<void>
+     abstract unsetUpstream -- repoPath: string, branch: string -- returns Promise<void>
+     abstract getCommitCount -- repoPath: string, baseBranch: string -- returns Promise<number>
+     abstract getLog -- repoPath: string, baseBranch: string, maxCount: number -- returns Promise<GitLogEntry 배열>
+     abstract diff -- repoPath: string, baseBranch: string -- returns Promise<string 배열>
+     abstract getFileAtRef -- repoPath: string, ref: string, filePath: string -- returns Promise<string>
+     abstract merge -- repoPath: string, branch: string -- returns Promise<void>
+
+2-2. GitServiceImpl 어댑터에 구현 -- flow-backend/src/git/infra/git-service-impl.ts
+
+     기존 위임 패턴과 동일:
+
+     async push(repoPath: string, branch: string): Promise<void> {
+       await this.gitClient.push(repoPath, branch);
+     }
+
+     async installPrePushHook(worktreePath: string): Promise<void> {
+       await this.gitClient.installPrePushHook(worktreePath);
+     }
+
+     async unsetUpstream(repoPath: string, branch: string): Promise<void> {
+       await this.gitClient.unsetUpstream(repoPath, branch);
+     }
+
+     async getCommitCount(repoPath: string, baseBranch: string): Promise<number> {
+       return this.gitClient.getCommitCount(repoPath, baseBranch);
+     }
+
+     async getLog(repoPath: string, baseBranch: string, maxCount: number): Promise<GitLogEntry[]> {
+       return this.gitClient.getLog(repoPath, baseBranch, maxCount);
+     }
+
+     async diff(repoPath: string, baseBranch: string): Promise<string[]> {
+       return this.gitClient.diff(repoPath, baseBranch);
+     }
+
+     async getFileAtRef(repoPath: string, ref: string, filePath: string): Promise<string> {
+       return this.gitClient.getFileAtRef(repoPath, ref, filePath);
+     }
+
+     async merge(repoPath: string, branch: string): Promise<void> {
+       await this.gitClient.merge(repoPath, branch);
+     }
+
+     import에 GitLogEntry 타입 추가.
+
+2-3. common/ports/index.ts에 GitLogEntry export가 포함되는지 확인. 필요하면 추가.
+
+2-4. 백엔드 검증 실행
+
+
+----- Phase 3 StartWorkflowRunUseCase 통합 -- C1 -----
+
+핵심 파일:
+  - flow-backend/src/workflow-runtime/application/commands/start-workflow-run-use-case.ts -- 수정
+참조할 코드 -- 읽기만, 수정하지 않음:
+  - flow-backend/src/git/infra/cli-git-client.ts -- hook 설치 동작 확인
+
+3-1. StartWorkflowRunUseCase 수정
+
+     execute 메서드에서 각 gitRef에 대한 worktree 생성 부분을 찾는다.
+     기존 코드:
+       await this.gitService.createWorktree({ ... });
+       const workTree = WorkTree.create({ ... });
+       await this.workTreeRepository.save(workTree);
+
+     createWorktree 호출 직후, WorkTree.create 전에 다음 두 줄을 추가:
+
+       // 에이전트의 원격 푸시 차단
+       await this.gitService.installPrePushHook(workTreePath);
+       // upstream 트래킹 해제 -- 새 브랜치가 원격 베이스를 추적하지 않도록
+       await this.gitService.unsetUpstream(workTreePath, resolvedBranchName);
+
+     주의:
+       - installPrePushHook에는 worktree 경로(workTreePath)를 전달
+       - unsetUpstream에는 worktree 경로와 브랜치명을 전달
+       - gitService.createWorktree의 baseBranch 옵션 때문에 git이 자동으로 upstream을 설정할 수 있으므로 반드시 해제
+
+3-2. 백엔드 검증 실행
+
+3-3. 통합 검증:
+     1. 워크플로우 런을 시작한다.
+     2. 생성된 worktree 경로에서 pre-push hook 파일이 존재하는지 확인:
+        worktree 경로의 .git 파일을 읽어 gitdir 경로를 확인하고,
+        해당 경로의 hooks/pre-push 파일이 있는지 확인.
+     3. git config --get branch.{branchName}.remote 가 빈 값인지 확인.
+
+3-4. 최종 백엔드 검증:
+     cd flow-backend && npm run typecheck && npm run test && npm run lint
+
+
+========================================================
+=== 파트 B: 작업 리니지 테이블 (Phase 4~7) ===
+========================================================
+
+작업 리니지란:
+  워크플로우 런이 완료되면 각 git 레포지토리의 로컬 브랜치에 커밋이 쌓인다.
+  작업 리니지는 이슈키별로 어떤 프로젝트(git 레포)에 어떤 브랜치가 있고, 몇 개의 커밋이 있는지를 한눈에 보여주는 테이블이다.
+  이 정보를 마크다운 테이블로 추출하여 이슈 트래커나 문서에 붙여넣을 수 있다.
+
+수정할 항목 목록:
+  A1. GetWorkLineageQuery -- 리니지 데이터 집계
+  A2. ExportWorkLineageQuery -- 마크다운 테이블 변환
+  B1. 컨트롤러에 리니지 엔드포인트 추가
+  B2. 모듈에 쿼리 등록
+  C1. 프론트엔드 API 타입 + 모듈
+  C2. React Query 훅
+  C3. WorkLineagePage 컴포넌트
+  C4. Sidebar + 라우트 추가
+
+
+----- Phase 4 백엔드 -- GetWorkLineageQuery + ExportWorkLineageQuery -----
+
+핵심 파일:
+  - flow-backend/src/workflow-runtime/application/queries/get-work-lineage-query.ts -- 신규
+  - flow-backend/src/workflow-runtime/application/queries/export-work-lineage-query.ts -- 신규
+참조할 코드 -- 읽기만, 수정하지 않음:
+  - flow-backend/src/workflow-runtime/application/queries/list-workflow-runs-query.ts -- 쿼리 패턴
+  - flow-backend/src/workflow-runtime/domain/ports/work-tree-repository.ts -- WorkTree 조회
+  - flow-backend/src/common/ports/git-service.ts -- getCommitCount, getCurrentCommit, getCurrentBranch
+  - flow-backend/src/common/ports/git-reader.ts -- findByIds
+  - flow-backend/src/common/ports/workflow-config-reader.ts -- 워크플로우 이름 조회
+
+4-1. 응답 인터페이스 정의
+
+     export interface WorkLineageRepoInfo:
+       gitId -- string
+       gitUrl -- string
+       branch -- string
+       commitHash -- string
+       commitCount -- number
+
+     export interface WorkLineageRunInfo:
+       workflowRunId -- string
+       workflowName -- string
+       runStatus -- string
+       repos -- WorkLineageRepoInfo 배열
+
+     export interface WorkLineageEntry:
+       issueKey -- string
+       runs -- WorkLineageRunInfo 배열
+
+4-2. GetWorkLineageQuery 생성 -- flow-backend/src/workflow-runtime/application/queries/get-work-lineage-query.ts
+
+     @Injectable 데코레이터.
+     생성자 주입:
+       - WorkflowRunRepository
+       - WorkTreeRepository
+       - GitService
+       - GitReader
+       - WorkflowConfigReader
+
+     async execute -- returns Promise<WorkLineageEntry 배열>
+
+     execute 로직:
+       1. const runs = await this.workflowRunRepository.findAll()
+          -- 모든 워크플로우 런 조회
+
+       2. issueKey 기준으로 그룹핑:
+          const groupedByIssueKey = new Map<string, WorkflowRun[]>()
+          for each run of runs:
+            const existing = groupedByIssueKey.get(run.issueKey) 또는 빈 배열
+            existing.push(run)
+            groupedByIssueKey.set(run.issueKey, existing)
+
+       3. 각 그룹에 대해 리니지 엔트리 생성:
+          const entries: WorkLineageEntry[] = []
+          for each [issueKey, runsForKey] of groupedByIssueKey:
+            const runInfos: WorkLineageRunInfo[] = []
+            for each run of runsForKey:
+              -- 워크플로우 이름 조회
+              const workflow = await this.workflowConfigReader.findById(run.workflowId)
+              const workflowName = workflow?.name ?? 'Unknown'
+
+              -- WorkTree 목록 조회
+              const workTrees = await this.workTreeRepository.findByWorkflowRunId(run.id)
+
+              -- 각 worktree의 git 정보 조회
+              const gitIds = workTrees.map(wt => wt.gitId)
+              const gitInfos = gitIds.length > 0 ? await this.gitReader.findByIds(gitIds) : []
+
+              const repos: WorkLineageRepoInfo[] = []
+              for each wt of workTrees:
+                const gitInfo = gitInfos.find(g => g.id === wt.gitId)
+                try:
+                  const branch = await this.gitService.getCurrentBranch(wt.path)
+                     -- getCurrentBranch가 GitService에 없으면 GitClient에서 직접 호출하거나
+                     -- GitService에 추가 필요. 기존 코드를 확인하고, 없으면 추가한다.
+                     -- 대안: wt.branch 필드를 사용하되, 실제 현재 브랜치는 다를 수 있음
+                  const commitHash = await this.gitService.getCurrentCommit(wt.path)
+                  -- gitRefPool에서 해당 gitId의 baseBranch 찾기
+                  const gitRef = run.gitRefPool.find(ref => ref.gitId === wt.gitId)
+                  const baseBranch = gitRef?.baseBranch ?? 'main'
+                  let commitCount = 0
+                  try:
+                    commitCount = await this.gitService.getCommitCount(wt.path, baseBranch)
+                  catch:
+                    commitCount = 0
+                  repos.push({
+                    gitId: wt.gitId,
+                    gitUrl: gitInfo?.url ?? '',
+                    branch,
+                    commitHash,
+                    commitCount,
+                  })
+                catch:
+                  -- worktree가 삭제되었거나 접근 불가 시 스킵
+                  repos.push({
+                    gitId: wt.gitId,
+                    gitUrl: gitInfo?.url ?? '',
+                    branch: wt.branch,
+                    commitHash: 'N/A',
+                    commitCount: 0,
+                  })
+
+              runInfos.push({
+                workflowRunId: run.id,
+                workflowName,
+                runStatus: run.status,
+                repos,
+              })
+
+            entries.push({ issueKey, runs: runInfos })
+
+       4. entries를 issueKey 알파벳순 정렬하여 반환
+
+     주의: GitService에 getCurrentBranch 메서드가 없을 수 있다.
+       없으면 GitService 포트와 GitServiceImpl에 추가:
+         abstract getCurrentBranch(repoPath: string): Promise<string>
+         구현: return this.gitClient.getCurrentBranch(repoPath)
+
+     import:
+       Injectable from @nestjs/common
+       WorkflowRunRepository from 도메인 인덱스
+       WorkTreeRepository from 도메인 포트
+       GitService, GitReader, WorkflowConfigReader from @common/ports/index.js
+       WorkflowRunId -- 타입
+
+4-3. ExportWorkLineageQuery 생성 -- flow-backend/src/workflow-runtime/application/queries/export-work-lineage-query.ts
+
+     @Injectable 데코레이터.
+     생성자 주입:
+       - GetWorkLineageQuery
+
+     async execute -- returns Promise<string>
+
+     execute 로직:
+       1. const entries = await this.getWorkLineageQuery.execute()
+       2. 마크다운 테이블로 변환:
+
+          빈 entries이면: return '리니지 데이터가 없습니다.'
+
+          const lines: string[] = []
+          lines.push('# 작업 리니지')
+          lines.push('')
+
+          for each entry of entries:
+            lines.push('## ' + entry.issueKey)
+            lines.push('')
+            lines.push('| 워크플로우 | 상태 | 프로젝트 | 브랜치 | 커밋 해시 | 커밋 수 |')
+            lines.push('|---|---|---|---|---|---|')
+
+            for each runInfo of entry.runs:
+              if runInfo.repos.length === 0:
+                lines.push('| ' + runInfo.workflowName + ' | ' + runInfo.runStatus + ' | - | - | - | 0 |')
+              else:
+                for each (repo, idx) of runInfo.repos:
+                  -- 첫 번째 repo는 워크플로우명과 상태 표시, 나머지는 빈칸
+                  const wfName = idx === 0 ? runInfo.workflowName : ''
+                  const status = idx === 0 ? runInfo.runStatus : ''
+                  -- gitUrl에서 프로젝트명 추출: URL의 마지막 segment에서 .git 제거
+                  const projectName = repo.gitUrl.split('/').pop()?.replace('.git', '') ?? repo.gitId
+                  const shortHash = repo.commitHash === 'N/A' ? 'N/A' : repo.commitHash.substring(0, 7)
+                  lines.push('| ' + wfName + ' | ' + status + ' | ' + projectName + ' | ' + repo.branch + ' | ' + shortHash + ' | ' + String(repo.commitCount) + ' |')
+
+            lines.push('')
+
+          return lines.join('\n')
+
+     import:
+       Injectable from @nestjs/common
+       GetWorkLineageQuery from ./get-work-lineage-query.js
+
+4-4. 백엔드 검증 실행
+
+
+----- Phase 5 백엔드 -- 리니지 컨트롤러 엔드포인트 -----
+
+핵심 파일:
+  - flow-backend/src/workflow-runtime/presentation/workflow-runtime.controller.ts -- 수정
+  - flow-backend/src/workflow-runtime/presentation/workflow-runtime.module.ts -- 수정
+
+5-1. 컨트롤러에 엔드포인트 추가
+
+     주의: 리니지 엔드포인트는 별도 컨트롤러를 만들거나 기존 런타임 컨트롤러에 추가한다.
+     기존 런타임 컨트롤러에 추가하는 경우:
+
+     생성자에 주입 추가:
+       private readonly getWorkLineageQuery: GetWorkLineageQuery
+       private readonly exportWorkLineageQuery: ExportWorkLineageQuery
+
+     GET 엔드포인트 추가:
+       @Get('work-lineage')
+       async getWorkLineage():
+         return this.getWorkLineageQuery.execute()
+
+     GET 엔드포인트 추가:
+       @Get('work-lineage/export')
+       @Header('Content-Type', 'text/markdown; charset=utf-8')
+       async exportWorkLineage(@Res() res: Response):
+         const markdown = await this.exportWorkLineageQuery.execute()
+         res.setHeader('Content-Type', 'text/markdown; charset=utf-8')
+         res.send(markdown)
+
+     주의: @Res() 사용 시 NestJS의 자동 직렬화가 비활성화된다.
+     또는 @Header 데코레이터만 사용하고 문자열을 직접 반환하는 방법:
+       @Get('work-lineage/export')
+       @Header('Content-Type', 'text/markdown; charset=utf-8')
+       async exportWorkLineage(): Promise<string>:
+         return this.exportWorkLineageQuery.execute()
+
+     import 추가:
+       Header from @nestjs/common -- 기존 import에 합침
+       GetWorkLineageQuery, ExportWorkLineageQuery
+
+     주의: 경로 충돌 방지.
+     런타임 컨트롤러의 기존 경로가 @Controller('workflow-runs')이면
+     리니지 엔드포인트는 /workflow-runs/work-lineage 와 /workflow-runs/work-lineage/export 가 된다.
+     또는 별도 @Controller('work-lineage') 컨트롤러를 만들면 /work-lineage 와 /work-lineage/export 가 된다.
+     -- 별도 컨트롤러 추천: 도메인 분리가 명확
+
+     별도 컨트롤러 생성 시:
+       flow-backend/src/workflow-runtime/presentation/work-lineage.controller.ts 신규 생성
+       @Controller('work-lineage') 데코레이터
+       @UseGuards(JwtAuthGuard) -- 기존 런타임 컨트롤러 패턴 따름
+       생성자에 GetWorkLineageQuery, ExportWorkLineageQuery 주입
+       GET / → getWorkLineage()
+       GET /export → exportWorkLineage()
+
+5-2. 모듈에 쿼리 + 컨트롤러 등록
+
+     workflow-runtime.module.ts의 providers에 추가:
+       GetWorkLineageQuery
+       ExportWorkLineageQuery
+
+     controllers에 추가 (별도 컨트롤러 생성 시):
+       WorkLineageController
+
+     import 추가
+
+5-3. 백엔드 검증 실행
+
+
+----- Phase 6 프론트엔드 -- API + 리니지 페이지 -----
+
+핵심 파일:
+  - flow-front/src/api/types.ts -- 수정
+  - flow-front/src/api/work-lineage.ts -- 신규
+  - flow-front/src/lib/query-keys.ts -- 수정
+  - flow-front/src/hooks/useWorkLineage.ts -- 신규
+  - flow-front/src/pages/WorkLineagePage.tsx -- 신규
+  - flow-front/src/components/layout/Sidebar.tsx -- 수정
+  - flow-front/src/App.tsx -- 수정
+참조할 코드 -- 읽기만, 수정하지 않음:
+  - flow-front/src/api/workflow-runs.ts -- API 모듈 패턴
+  - flow-front/src/hooks/useWorkflowRuns.ts -- 훅 패턴
+  - flow-front/src/pages/WorkflowRunListPage.tsx -- 테이블 페이지 패턴
+  - flow-front/src/components/DataTable.tsx -- 테이블 컴포넌트
+
+6-1. 타입 추가 -- flow-front/src/api/types.ts
+
+     파일 하단에 추가:
+
+     // --- Work Lineage ---
+
+     export interface WorkLineageRepoInfo {
+       gitId: string;
+       gitUrl: string;
+       branch: string;
+       commitHash: string;
+       commitCount: number;
+     }
+
+     export interface WorkLineageRunInfo {
+       workflowRunId: string;
+       workflowName: string;
+       runStatus: string;
+       repos: WorkLineageRepoInfo[];
+     }
+
+     export interface WorkLineageEntry {
+       issueKey: string;
+       runs: WorkLineageRunInfo[];
+     }
+
+6-2. API 모듈 생성 -- flow-front/src/api/work-lineage.ts
+
+     import apiClient from './client';
+     import type { WorkLineageEntry } from './types';
+
+     export const workLineageApi = {
+       getLineage: () =>
+         apiClient.get<unknown, WorkLineageEntry[]>('/work-lineage'),
+
+       exportLineage: async (): Promise<string> => {
+         const response = await apiClient.get<unknown, string>('/work-lineage/export', {
+           responseType: 'text',
+           transformResponse: [(data: string) => data],
+         });
+         return response as unknown as string;
+       },
+     };
+
+     주의: export의 경우 text/markdown 응답이므로 responseType과 transformResponse 설정.
+     axios 인터셉터가 response.data를 자동 추출하므로 이를 고려.
+
+6-3. 쿼리 키 추가 -- flow-front/src/lib/query-keys.ts
+
+     queryKeys 객체에 추가:
+       workLineage: {
+         all: ['work-lineage'] as const,
+         export: ['work-lineage', 'export'] as const,
+       },
+
+6-4. React Query 훅 생성 -- flow-front/src/hooks/useWorkLineage.ts
+
+     import { useQuery } from '@tanstack/react-query';
+     import { queryKeys } from '@/lib/query-keys';
+     import { workLineageApi } from '@/api/work-lineage';
+
+     export function useWorkLineage() {
+       const lineageQuery = useQuery({
+         queryKey: queryKeys.workLineage.all,
+         queryFn: workLineageApi.getLineage,
+         refetchInterval: 10000, -- 10초마다 갱신
+       });
+
+       return { lineageQuery };
+     }
+
+6-5. WorkLineagePage 생성 -- flow-front/src/pages/WorkLineagePage.tsx
+
+     import:
+       useWorkLineage from @/hooks/useWorkLineage
+       workLineageApi from @/api/work-lineage
+       PageHeader from @/components/layout/PageHeader
+       StatusBadge from @/components/StatusBadge -- 또는 직접 배지 생성
+       Button from @/components/ui/button
+       LoadingSpinner from @/components/LoadingSpinner
+       ChevronDown, ChevronRight, Copy, Download from lucide-react
+       useState from react
+       RUN_STATUS_COLOR, RUN_STATUS_LABEL from @/lib/constants
+
+     컴포넌트 구조:
+
+       const { lineageQuery } = useWorkLineage()
+       const [expandedKeys, setExpandedKeys] = useState<Set<string>>(new Set())
+
+       토글 함수:
+         const toggleKey = (key: string) => {
+           setExpandedKeys(prev => {
+             const next = new Set(prev)
+             if (next.has(key)) next.delete(key)
+             else next.add(key)
+             return next
+           })
+         }
+
+       마크다운 복사 함수:
+         const handleCopyMarkdown = async () => {
+           const markdown = await workLineageApi.exportLineage()
+           await navigator.clipboard.writeText(markdown)
+           -- 복사 완료 알림 (간단한 상태 변경 또는 toast)
+         }
+
+       마크다운 다운로드 함수:
+         const handleDownloadMarkdown = async () => {
+           const markdown = await workLineageApi.exportLineage()
+           const blob = new Blob([markdown], { type: 'text/markdown' })
+           const url = URL.createObjectURL(blob)
+           const a = document.createElement('a')
+           a.href = url
+           a.download = 'work-lineage.md'
+           a.click()
+           URL.revokeObjectURL(url)
+         }
+
+       렌더링:
+         PageHeader title="작업 리니지"
+
+         상단 액션 버튼:
+           Button variant=outline size=sm onClick=handleCopyMarkdown:
+             Copy 아이콘 + "마크다운 복사"
+           Button variant=outline size=sm onClick=handleDownloadMarkdown:
+             Download 아이콘 + "마크다운 다운로드"
+
+         로딩 중이면 LoadingSpinner 표시.
+         데이터 없으면 빈 상태 메시지.
+
+         이슈키별 아코디언 테이블:
+           for each entry of lineageQuery.data:
+             div -- border rounded-lg mb-3:
+               헤더 div -- cursor-pointer, flex items-center justify-between, p-3, bg-muted/30:
+                 onClick: toggleKey(entry.issueKey)
+                 좌측:
+                   ChevronDown 또는 ChevronRight 아이콘 (expanded 여부)
+                   span font-semibold: entry.issueKey
+                   span text-muted-foreground text-sm: entry.runs.length + '개 실행'
+                 우측:
+                   실행 수 및 상태 요약 표시
+
+               expanded이면 콘텐츠 div -- p-3:
+                 table -- w-full text-sm:
+                   thead:
+                     tr:
+                       th: 워크플로우
+                       th: 상태
+                       th: 프로젝트
+                       th: 브랜치
+                       th: 커밋 해시
+                       th: 커밋 수
+                   tbody:
+                     for each runInfo of entry.runs:
+                       if runInfo.repos.length === 0:
+                         tr:
+                           td: runInfo.workflowName
+                           td: 상태 배지
+                           td colspan=4: -
+                       else:
+                         for each (repo, idx) of runInfo.repos:
+                           tr:
+                             td: idx === 0 ? runInfo.workflowName : ''
+                             td: idx === 0 ? 상태 배지 : ''
+                             td: URL에서 추출한 프로젝트명
+                             td: repo.branch -- code 태그
+                             td: repo.commitHash.substring(0, 7) -- code 태그, monospace
+                             td: repo.commitCount
+
+         프로젝트명 추출 유틸:
+           function extractProjectName(gitUrl: string): string {
+             return gitUrl.split('/').pop()?.replace('.git', '') ?? gitUrl;
+           }
+
+6-6. Sidebar에 네비게이션 추가 -- flow-front/src/components/layout/Sidebar.tsx
+
+     lucide-react에서 GitPullRequest 또는 Network 아이콘 import.
+     navItems에 Runs 다음 위치에 추가:
+       { to: '/work-lineage', label: 'Lineage', icon: Network }
+
+6-7. App.tsx에 라우트 추가 -- flow-front/src/App.tsx
+
+     import WorkLineagePage from @/pages/WorkLineagePage
+     Route 추가 -- 기존 라우트들 사이에:
+       path: '/work-lineage'
+       element: <WorkLineagePage />
+
+6-8. 프론트엔드 검증 실행
+
+
+----- Phase 7 리니지 통합 검증 -----
+
+7-1. 백엔드 서버 빌드 후 실행:
+     cd flow-backend && npm run build && npm run start
+
+7-2. 프론트엔드 dev 서버 실행:
+     cd flow-front && npm run dev
+
+7-3. Playwright MCP로 다음 시나리오를 검증:
+
+     시나리오 A -- 리니지 페이지 접근:
+       사이드바에서 Lineage 메뉴 클릭
+       /work-lineage 경로로 이동하는지 확인
+       PageHeader에 "작업 리니지" 텍스트 표시
+
+     시나리오 B -- 리니지 데이터 표시:
+       완료된 워크플로우 런이 있다면:
+         이슈키별 아코디언 항목이 표시되는지 확인
+         이슈키 클릭 시 확장되어 테이블이 표시되는지 확인
+         테이블에 워크플로우명, 상태, 프로젝트, 브랜치, 커밋 해시, 커밋 수가 표시되는지 확인
+       없다면:
+         빈 상태 메시지가 표시되는지 확인
+
+     시나리오 C -- 마크다운 복사:
+       마크다운 복사 버튼 클릭 -- 에러 없이 동작하는지 확인
+
+     시나리오 D -- 마크다운 다운로드:
+       마크다운 다운로드 버튼 클릭 -- work-lineage.md 파일 다운로드
+
+7-4. 문제 발견 시 즉시 수정하고 재검증
+
+7-5. 최종 검증:
+     cd flow-backend && npm run typecheck && npm run test && npm run lint
+     cd flow-front && npx tsc -b && npm run lint && npm run build
+
+
+========================================================
+=== 파트 C: 애드혹 워크스페이스 (Phase 8~15) ===
+========================================================
+
+애드혹 워크스페이스란:
+  워크플로우를 정의하지 않고도 사용자가 직접 레포지토리와 브랜치명을 지정하여 작업 환경을 생성한다.
+  이 환경에서 에이전트와 채팅형 대화를 진행하며, 모나코 에디터로 파일 변경 사항을 실시간 diff로 확인할 수 있다.
+  워크플로우 런과 달리 자동 태스크 진행이 없고, 사용자가 직접 메시지를 보내면 에이전트가 응답한다.
+
+수정할 항목 목록:
+  A1. WorkspaceId branded ID 생성
+  A2. WorkspaceGitRef VO 생성
+  A3. WorkspaceStatus VO 생성
+  A4. Workspace 엔티티 생성
+  A5. WorkspaceRepository 포트 생성
+  A6. 도메인 이벤트 생성
+  B1. CreateWorkspaceUseCase 생성
+  B2. GetWorkspaceQuery 생성
+  B3. ListWorkspacesQuery 생성
+  B4. DeleteWorkspaceUseCase 생성
+  B5. CompleteWorkspaceUseCase 생성
+  C1. SendChatMessageUseCase 생성
+  C2. GetWorkspaceTreeQuery 생성
+  C3. GetWorkspaceFileQuery 생성
+  C4. GetWorkspaceDiffQuery 생성
+  D1. InMemoryWorkspaceRepository 생성
+  D2. WorkspaceController + DTOs 생성
+  D3. WorkspaceModule 생성 + AppModule 등록
+  E1. 프론트엔드 API 타입
+  E2. API 모듈
+  E3. React Query 훅
+  F1. WorkspaceListPage
+  F2. WorkspaceCreatePage
+  G1. WorkspaceDetailPage (채팅 + 모나코 diff + 파일 트리)
+  G2. ChatPanel 컴포넌트
+  G3. DiffViewerPanel 컴포넌트
+
+
+----- Phase 8 백엔드 도메인 -- 엔티티, VO, 포트, ID -- A1~A6 -----
+
+핵심 파일:
+  - flow-backend/src/workspace/domain/entities/workspace.ts -- 신규
+  - flow-backend/src/workspace/domain/value-objects/workspace-id.ts -- 신규
+  - flow-backend/src/workspace/domain/value-objects/workspace-git-ref.ts -- 신규
+  - flow-backend/src/workspace/domain/value-objects/workspace-status.ts -- 신규
+  - flow-backend/src/workspace/domain/value-objects/index.ts -- 신규
+  - flow-backend/src/workspace/domain/ports/workspace-repository.ts -- 신규
+  - flow-backend/src/workspace/domain/errors/index.ts -- 신규
+  - flow-backend/src/workspace/domain/index.ts -- 신규
+  - flow-backend/src/common/events/ -- 이벤트 파일 추가
+  - flow-backend/src/common/ids/index.ts -- WorkspaceId export 추가
+참조할 코드 -- 읽기만, 수정하지 않음:
+  - flow-backend/src/workflow-runtime/domain/entities/workflow-run.ts -- 엔티티 패턴
+  - flow-backend/src/common/ids/ -- branded ID 패턴
+  - flow-backend/src/common/aggregate-root.ts -- AggregateRoot 베이스 클래스
+  - flow-backend/src/common/events/ -- 이벤트 정의 패턴
+
+8-1. WorkspaceId branded ID 생성
+
+     기존 branded ID 패턴을 확인한다.
+     flow-backend/src/common/ids/ 디렉토리에서 기존 ID 구현을 참조한다.
+     동일 패턴으로 WorkspaceId를 생성한다.
+
+     파일: flow-backend/src/common/ids/workspace-id.ts 또는
+           flow-backend/src/workspace/domain/value-objects/workspace-id.ts
+     -- 기존 프로젝트의 ID 배치 패턴을 따른다.
+
+     common/ids/index.ts에 export 추가.
+
+8-2. WorkspaceGitRef VO 생성
+
+     파일: flow-backend/src/workspace/domain/value-objects/workspace-git-ref.ts
+
+     export class WorkspaceGitRef:
+       private constructor(
+         private readonly _gitId: GitId,
+         private readonly _baseBranch: string,
+         private readonly _branchName: string,
+       )
+
+       static create(props: { gitId: GitId; baseBranch: string; branchName: string }): WorkspaceGitRef
+         branchName이 비어있으면 에러
+         baseBranch가 비어있으면 에러
+         return new WorkspaceGitRef(props.gitId, props.baseBranch, props.branchName)
+
+       get gitId(): GitId
+       get baseBranch(): string
+       get branchName(): string
+
+     import: GitId from @common/ids/index.js
+
+8-3. WorkspaceStatus VO 생성
+
+     파일: flow-backend/src/workspace/domain/value-objects/workspace-status.ts
+
+     export enum WorkspaceStatus:
+       ACTIVE = 'ACTIVE'
+       COMPLETED = 'COMPLETED'
+
+8-4. Workspace 엔티티 생성
+
+     파일: flow-backend/src/workspace/domain/entities/workspace.ts
+
+     import: AggregateRoot from @common/aggregate-root.js
+     import: WorkspaceId, WorkspaceStatus, WorkspaceGitRef
+     import: McpServerRefNodeConfig from workflow-runtime 도메인 또는 common
+       -- McpServerRefNodeConfig가 어디에 정의되어 있는지 확인. 없으면 별도 VO 생성.
+       -- 기존 McpServerRefNodeConfig를 재사용하거나, workspace 전용 VO를 만든다.
+
+     export interface WorkspaceCreateProps:
+       name: string
+       model: string
+       gitRefs: WorkspaceGitRef[]
+       mcpServerRefs: { mcpServerId: string; envOverrides: Record<string, string> }[]
+       path: string
+
+     export interface WorkspaceFromProps:
+       id: WorkspaceId
+       name: string
+       status: WorkspaceStatus
+       model: string
+       gitRefs: WorkspaceGitRef[]
+       mcpServerRefs: { mcpServerId: string; envOverrides: Record<string, string> }[]
+       path: string
+       agentSessionId: string | null
+       createdAt: Date
+       version?: number
+
+     export class Workspace extends AggregateRoot<WorkspaceId>:
+       private readonly _id: WorkspaceId
+       private readonly _name: string
+       private _status: WorkspaceStatus
+       private readonly _model: string
+       private readonly _gitRefs: readonly WorkspaceGitRef[]
+       private readonly _mcpServerRefs: readonly { mcpServerId: string; envOverrides: Record<string, string> }[]
+       private readonly _path: string
+       private _agentSessionId: string | null
+       private readonly _createdAt: Date
+
+       private constructor(props: WorkspaceFromProps)
+         super()
+         모든 필드 할당
+         version이 있으면 setVersion
+
+       static create(props: WorkspaceCreateProps): Workspace
+         name이 비어있으면 에러
+         model이 비어있으면 에러
+         const id = WorkspaceId.generate()
+         const workspace = new Workspace({
+           id, name: props.name, status: WorkspaceStatus.ACTIVE,
+           model: props.model, gitRefs: props.gitRefs,
+           mcpServerRefs: props.mcpServerRefs, path: props.path,
+           agentSessionId: null, createdAt: new Date(),
+         })
+         workspace.addDomainEvent(new WorkspaceCreated({ workspaceId: id }))
+         return workspace
+
+       static fromProps(props: WorkspaceFromProps): Workspace
+         return new Workspace(props)
+
+       -- Getters
+       get id, name, status, model, gitRefs, mcpServerRefs, path, agentSessionId, createdAt
+
+       assignAgentSession(sessionId: string): void
+         this._agentSessionId = sessionId
+         this.incrementVersion()
+
+       complete(): void
+         if this._status !== WorkspaceStatus.ACTIVE then 에러
+         this._status = WorkspaceStatus.COMPLETED
+         this.incrementVersion()
+         this.addDomainEvent(new WorkspaceCompleted({ workspaceId: this._id }))
+
+       isActive(): boolean
+         return this._status === WorkspaceStatus.ACTIVE
+
+8-5. WorkspaceRepository 포트 생성
+
+     파일: flow-backend/src/workspace/domain/ports/workspace-repository.ts
+
+     export abstract class WorkspaceRepository:
+       abstract save(workspace: Workspace): Promise<void>
+       abstract findById(id: WorkspaceId): Promise<Workspace | null>
+       abstract findAll(): Promise<Workspace[]>
+       abstract delete(id: WorkspaceId): Promise<void>
+
+8-6. 도메인 이벤트 생성
+
+     기존 이벤트 패턴을 확인한다.
+     flow-backend/src/common/events/ 디렉토리에서 기존 이벤트 구현을 참조.
+
+     WorkspaceCreated 이벤트:
+       payload: { workspaceId: WorkspaceId }
+
+     WorkspaceCompleted 이벤트:
+       payload: { workspaceId: WorkspaceId }
+
+     common/events/index.ts에 export 추가.
+
+8-7. 에러 클래스 생성
+
+     파일: flow-backend/src/workspace/domain/errors/index.ts
+
+     기존 도메인 에러 패턴 참조.
+     WorkspaceInvariantViolationError extends DomainError (또는 적절한 베이스)
+
+8-8. 인덱스 파일 생성
+
+     flow-backend/src/workspace/domain/index.ts -- 모든 도메인 내보내기
+     flow-backend/src/workspace/domain/value-objects/index.ts -- VO 내보내기
+
+8-9. 백엔드 검증 실행
+
+
+----- Phase 9 백엔드 애플리케이션 -- CRUD 유스케이스 -- B1~B5 -----
+
+핵심 파일:
+  - flow-backend/src/workspace/application/commands/create-workspace-use-case.ts -- 신규
+  - flow-backend/src/workspace/application/commands/delete-workspace-use-case.ts -- 신규
+  - flow-backend/src/workspace/application/commands/complete-workspace-use-case.ts -- 신규
+  - flow-backend/src/workspace/application/queries/get-workspace-query.ts -- 신규
+  - flow-backend/src/workspace/application/queries/list-workspaces-query.ts -- 신규
+  - flow-backend/src/workspace/application/factories/workspace-path-factory.ts -- 신규
+참조할 코드 -- 읽기만, 수정하지 않음:
+  - flow-backend/src/workflow-runtime/application/commands/start-workflow-run-use-case.ts -- 워크트리 생성 패턴
+  - flow-backend/src/workflow-runtime/application/factories/workspace-path-factory.ts -- 경로 팩토리 패턴
+
+9-1. WorkspacePathFactory 생성
+
+     기존 WorkspacePathFactory 패턴 참조.
+
+     @Injectable 데코레이터
+     생성자에서 basePath 결정: process.env.FLOWFLOW_DATA_PATH 또는 'flowflow-data'
+
+     workspacePath(workspaceId: WorkspaceId): string
+       return join(this.basePath, 'workspaces', 'adhoc', workspaceId)
+
+     workTreePath(workspaceId: WorkspaceId, gitId: GitId): string
+       return join(this.basePath, 'worktrees', 'adhoc', workspaceId, gitId)
+
+9-2. CreateWorkspaceUseCase 생성
+
+     @Injectable 데코레이터
+     생성자 주입:
+       - WorkspaceRepository
+       - GitReader
+       - GitService
+       - AgentService
+       - EventPublisher
+       - FileSystem (workflow-runtime의 FileSystem 포트 재사용)
+       - WorkspacePathFactory
+       - McpServerReader (MCP 서버 검증용)
+
+     CreateWorkspaceCommand 인터페이스:
+       name: string
+       model: string
+       gitRefs: { gitId: string; baseBranch: string; branchName: string }[]
+       mcpServerRefs: { mcpServerId: string; envOverrides: Record<string, string> }[]
+
+     async execute(command: CreateWorkspaceCommand): Promise<{ workspaceId: string }>
+
+     execute 로직:
+       1. WorkspaceGitRef[] 생성:
+          gitRefs = command.gitRefs.map(ref => WorkspaceGitRef.create({
+            gitId: GitId.create(ref.gitId),
+            baseBranch: ref.baseBranch,
+            branchName: ref.branchName,
+          }))
+
+       2. 워크스페이스 엔티티 생성:
+          const workspacePath = this.workspacePathFactory.workspacePath(workspace.id)
+          -- 엔티티 생성 전에 path를 알아야 하므로 임시 ID 생성이 필요하거나,
+          -- Workspace.create 내부에서 ID를 먼저 생성하므로 순서를 조정:
+          -- 방법: Workspace.create를 먼저 호출하여 id를 얻고, path를 나중에 설정
+          -- 또는: WorkspaceId를 먼저 생성하고 path를 계산한 후 create에 전달
+
+          const workspaceId = WorkspaceId.generate() -- 별도 생성이 가능한지 확인
+          -- 기존 패턴: 엔티티 create 내부에서 ID를 생성함
+          -- 대안: path를 create props에 포함하고, create 내부에서 사용
+
+          const workspace = Workspace.create({
+            name: command.name,
+            model: command.model,
+            gitRefs,
+            mcpServerRefs: command.mcpServerRefs,
+            path: this.workspacePathFactory.workspacePath(WorkspaceId 미정),
+          })
+          -- 이 부분은 실제 구현 시 ID 생성 순서를 적절히 조정한다.
+          -- 간단한 방법: create 내부에서 ID 생성 후 path는 별도로 설정하거나,
+          -- create props에 path를 빈 문자열로 넣고 이후 설정하거나,
+          -- create 시그니처를 변경하여 id를 외부에서 받을 수 있게 한다.
+
+       3. 디렉토리 생성:
+          await this.fileSystem.createDirectory(workspace.path)
+
+       4. Git worktree 생성 (StartWorkflowRunUseCase 패턴 참조):
+          const gitIds = gitRefs.map(ref => ref.gitId)
+          const gitInfos = gitIds.length > 0 ? await this.gitReader.findByIds(gitIds) : []
+
+          for each gitRef of gitRefs:
+            const gitInfo = gitInfos.find(g => g.id === gitRef.gitId)
+            if not gitInfo then continue
+
+            const workTreePath = this.workspacePathFactory.workTreePath(workspace.id, gitRef.gitId)
+
+            -- 원격 정보 최신화
+            await this.gitService.fetch(gitInfo.localPath)
+
+            -- 기존 브랜치 충돌 처리
+            const exists = await this.gitService.branchExists(gitInfo.localPath, gitRef.branchName)
+            if exists:
+              try: await this.gitService.removeWorktreeForBranch(gitInfo.localPath, gitRef.branchName)
+              catch: 무시
+              await this.gitService.deleteBranch(gitInfo.localPath, gitRef.branchName)
+
+            -- worktree 생성
+            await this.gitService.createWorktree({
+              repoPath: gitInfo.localPath,
+              worktreePath: workTreePath,
+              baseBranch: gitRef.baseBranch,
+              newBranchName: gitRef.branchName,
+            })
+
+            -- 안전장치: pre-push hook 설치 + upstream 해제
+            await this.gitService.installPrePushHook(workTreePath)
+            await this.gitService.unsetUpstream(workTreePath, gitRef.branchName)
+
+            -- 워크스페이스 디렉토리에 symlink 생성
+            -- workspace.path/{gitId 또는 프로젝트명} → workTreePath
+            const linkPath = join(workspace.path, gitRef.gitId)
+            await this.fileSystem.createSymlink(workTreePath, linkPath)
+
+       5. MCP 서버 설정 검증 + 변환:
+          const mcpServerIds = command.mcpServerRefs.map(ref => ref.mcpServerId)
+          const mcpServers = mcpServerIds.length > 0 ? await this.mcpServerReader.findByIds(mcpServerIds) : []
+          const mcpServerConfigs = command.mcpServerRefs.map(ref => {
+            const server = mcpServers.find(s => s.id === ref.mcpServerId)
+            if not server then throw 에러
+            return {
+              name: server.name,
+              command: server.command,
+              args: [...server.args],
+              env: { ...server.env, ...ref.envOverrides },
+            }
+          })
+
+       6. 에이전트 세션 시작:
+          -- AgentService는 workExecutionId를 요구하므로, workspace용 별도 시작 방법이 필요.
+          -- 방법 1: AgentService에 startWorkspaceSession 메서드 추가
+          -- 방법 2: workExecutionId 대신 workspaceId를 사용하여 기존 startSession 호출
+          -- 방법 3: AgentClient를 직접 사용
+          -- 가장 깔끔한 방법: AgentService 포트에 startSessionForWorkspace 추가
+
+          -- AgentService 포트 수정이 필요:
+          -- 기존 startSession은 workExecutionId, workflowRunId를 요구함.
+          -- workspace에서는 이 값들이 없으므로, 새 메서드가 필요하거나
+          -- 기존 메서드에 optional 파라미터로 workspaceId를 추가.
+
+          -- 권장 접근: AgentService에 새 포트 메서드 추가:
+          -- startSessionForWorkspace(options: StartWorkspaceSessionOptions): Promise<AgentSessionInfo>
+          --   options: { workspaceId, model, workspacePath, mcpServerConfigs }
+
+          -- 또는 더 간단하게: AgentClient를 직접 사용하여 세션 시작.
+          -- AgentClient.start()는 workExecutionId 없이도 동작함.
+
+          -- 결정: AgentService에 startSessionForWorkspace 추가.
+          -- 이 방법이 포트 기반 아키텍처에 부합.
+
+          const sessionInfo = await this.agentService.startSessionForWorkspace({
+            workspaceId: workspace.id,
+            model: command.model,
+            workspacePath: workspace.path,
+            mcpServerConfigs,
+          })
+
+          workspace.assignAgentSession(sessionInfo.sessionId)
+
+       7. 저장 + 이벤트 발행:
+          await this.workspaceRepository.save(workspace)
+          await this.eventPublisher.publishAll(workspace.clearDomainEvents())
+
+          return { workspaceId: workspace.id }
+
+     주의: FileSystem 포트에 createSymlink 메서드가 없을 수 있다.
+       없으면 FileSystem 포트에 추가:
+         abstract createSymlink(target: string, linkPath: string): Promise<void>
+       NodeFileSystem 구현체에 추가:
+         import { symlink } from 'node:fs/promises'
+         async createSymlink(target, linkPath) { await symlink(target, linkPath) }
+
+     주의: AgentService 포트에 startSessionForWorkspace, sendQueryForWorkspace,
+       stopSessionForWorkspace 메서드 추가가 필요하다.
+       -- AgentService 포트: flow-backend/src/common/ports/agent-service.ts
+       -- AgentServiceImpl 구현체: flow-backend/src/agent/infra/agent-service-impl.ts
+       -- 기존 startSession과 유사하되 workExecutionId 대신 workspaceId를 사용.
+       -- AgentSession 엔티티에 workspaceId 필드를 추가하거나,
+       -- 별도 맵으로 workspace session을 관리.
+
+       간단한 접근: AgentServiceImpl에서 workspaceId를 workExecutionId처럼 사용.
+       -- workExecutionId 필드에 workspaceId 문자열을 넣으면 기존 로직이 그대로 동작.
+       -- 이 방법은 타입 안전성이 떨어지지만 빠르게 구현 가능.
+       -- 더 나은 방법: AgentService 포트에 별도 메서드 추가.
+
+       권장:
+         AgentService 포트에 추가:
+           abstract startSessionForWorkspace(options: StartWorkspaceSessionOptions): Promise<AgentSessionInfo>
+           abstract sendQueryForWorkspace(workspaceId: string, query: string): Promise<QueryResult>
+           abstract stopSessionForWorkspace(workspaceId: string): Promise<void>
+
+         StartWorkspaceSessionOptions 인터페이스:
+           workspaceId: string
+           model: string
+           workspacePath: string
+           mcpServerConfigs: McpServerConfig[]
+
+         AgentServiceImpl에서 구현:
+           기존 startSession과 동일한 로직이되 workExecutionId 대신 workspaceId를 키로 사용.
+           AgentSession 엔티티의 workExecutionId 필드에 workspaceId를 넣거나,
+           별도 Map<workspaceId, sessionId>를 관리.
+
+9-3. GetWorkspaceQuery 생성
+
+     @Injectable 데코레이터
+     생성자 주입: WorkspaceRepository, GitReader
+
+     async execute(id: WorkspaceId): Promise<WorkspaceDetailResponse>
+       workspace = await repository.findById(id)
+       없으면 에러
+
+       -- gitRefs에서 gitUrl 정보를 추가하여 응답 구성
+       const gitInfos = await this.gitReader.findByIds(workspace.gitRefs.map(r => r.gitId))
+
+       return {
+         id: workspace.id,
+         name: workspace.name,
+         status: workspace.status,
+         model: workspace.model,
+         path: workspace.path,
+         agentSessionId: workspace.agentSessionId,
+         createdAt: workspace.createdAt.toISOString(),
+         gitRefs: workspace.gitRefs.map(ref => ({
+           gitId: ref.gitId,
+           gitUrl: gitInfos.find(g => g.id === ref.gitId)?.url ?? '',
+           baseBranch: ref.baseBranch,
+           branchName: ref.branchName,
+         })),
+         mcpServerRefs: workspace.mcpServerRefs,
+       }
+
+9-4. ListWorkspacesQuery 생성
+
+     @Injectable 데코레이터
+     생성자 주입: WorkspaceRepository
+
+     async execute(): Promise<WorkspaceListItem[]>
+       const workspaces = await repository.findAll()
+       return workspaces.map(ws => ({
+         id: ws.id,
+         name: ws.name,
+         status: ws.status,
+         model: ws.model,
+         gitRefCount: ws.gitRefs.length,
+         createdAt: ws.createdAt.toISOString(),
+       }))
+
+9-5. DeleteWorkspaceUseCase 생성
+
+     @Injectable 데코레이터
+     생성자 주입: WorkspaceRepository, AgentService, GitService, GitReader, FileSystem
+
+     async execute(id: WorkspaceId): Promise<void>
+       workspace = await repository.findById(id)
+       없으면 에러
+
+       -- 에이전트 세션 종료
+       if workspace.agentSessionId:
+         try: await agentService.stopSessionForWorkspace(workspace.id)
+         catch: 무시
+
+       -- worktree 삭제
+       const gitInfos = await this.gitReader.findByIds(workspace.gitRefs.map(r => r.gitId))
+       for each gitRef of workspace.gitRefs:
+         const gitInfo = gitInfos.find(g => g.id === gitRef.gitId)
+         if gitInfo:
+           try:
+             const workTreePath = -- workspace.path에서 symlink 대상을 찾거나,
+               -- pathFactory를 사용하여 경로 계산
+             await gitService.removeWorktreeForBranch(gitInfo.localPath, gitRef.branchName)
+             await gitService.deleteBranch(gitInfo.localPath, gitRef.branchName)
+           catch: 무시
+
+       -- 디렉토리 삭제
+       try: await fileSystem.deleteDirectory(workspace.path)
+       catch: 무시
+
+       await repository.delete(id)
+
+9-6. CompleteWorkspaceUseCase 생성
+
+     @Injectable 데코레이터
+     생성자 주입: WorkspaceRepository, AgentService, EventPublisher
+
+     async execute(id: WorkspaceId): Promise<void>
+       workspace = await repository.findById(id)
+       없으면 에러
+       workspace.complete()
+       -- 에이전트 세션 종료
+       if workspace.agentSessionId:
+         try: await agentService.stopSessionForWorkspace(workspace.id)
+         catch: 무시
+       await repository.save(workspace)
+       await eventPublisher.publishAll(workspace.clearDomainEvents())
+
+9-7. 백엔드 검증 실행
+
+
+----- Phase 10 백엔드 애플리케이션 -- 채팅 + 파일 탐색 + diff -- C1~C4 -----
+
+핵심 파일:
+  - flow-backend/src/workspace/application/commands/send-chat-message-use-case.ts -- 신규
+  - flow-backend/src/workspace/application/queries/get-workspace-tree-query.ts -- 신규
+  - flow-backend/src/workspace/application/queries/get-workspace-file-query.ts -- 신규
+  - flow-backend/src/workspace/application/queries/get-workspace-diff-query.ts -- 신규
+참조할 코드 -- 읽기만, 수정하지 않음:
+  - flow-backend/src/workflow-runtime/application/queries/get-workspace-tree-query.ts -- 파일 트리 패턴
+  - flow-backend/src/workflow-runtime/application/queries/get-workspace-file-query.ts -- 파일 읽기 패턴
+  - flow-backend/src/workflow-runtime/application/commands/send-query-use-case.ts -- 에이전트 쿼리 패턴
+
+10-1. SendChatMessageUseCase 생성
+
+     @Injectable 데코레이터
+     생성자 주입: WorkspaceRepository, AgentService
+
+     SendChatMessageCommand 인터페이스:
+       workspaceId: WorkspaceId
+       message: string
+
+     async execute(command: SendChatMessageCommand): Promise<{ response: string }>
+       workspace = await repository.findById(command.workspaceId)
+       없으면 에러
+       if not workspace.isActive() then 에러: 완료된 워크스페이스에서는 채팅 불가
+
+       const result = await this.agentService.sendQueryForWorkspace(
+         workspace.id, command.message
+       )
+       return { response: result.response }
+
+10-2. GetWorkspaceTreeQuery 생성
+
+     기존 workflow-runtime의 GetWorkspaceTreeQuery와 거의 동일한 패턴.
+     WorkspaceRepository를 사용하여 workspace.path를 기준으로 파일 트리를 조회.
+
+     @Injectable 데코레이터
+     생성자 주입: WorkspaceRepository, FileSystem
+
+     async execute(workspaceId: WorkspaceId): Promise<FileTreeEntry[]>
+       workspace = await repository.findById(workspaceId)
+       없으면 에러
+       -- 기존 패턴과 동일한 재귀 디렉토리 탐색
+       -- node_modules, .git 등 제외
+
+10-3. GetWorkspaceFileQuery 생성
+
+     기존 패턴과 동일.
+     경로 보안 검증 (path traversal 방지) 포함.
+
+10-4. GetWorkspaceDiffQuery 생성
+
+     @Injectable 데코레이터
+     생성자 주입: WorkspaceRepository, GitService, GitReader, FileSystem
+
+     export interface DiffFileInfo:
+       path -- string -- 파일 상대 경로
+       original -- string -- 베이스 브랜치의 파일 내용
+       modified -- string -- 현재 파일 내용
+
+     async execute(workspaceId: WorkspaceId, gitId?: string): Promise<DiffFileInfo[]>
+       workspace = await repository.findById(workspaceId)
+       없으면 에러
+
+       -- gitId가 지정되면 해당 repo만, 아니면 첫 번째 repo
+       const targetGitRef = gitId
+         ? workspace.gitRefs.find(r => r.gitId === gitId)
+         : workspace.gitRefs[0]
+       if not targetGitRef then return []
+
+       -- worktree 경로 결정
+       -- workspace.path 내의 symlink를 통해 worktree 경로를 찾거나,
+       -- pathFactory를 사용
+       const workTreePath = -- symlink 해석 또는 path 계산
+
+       -- 변경된 파일 목록
+       const changedFiles = await this.gitService.diff(workTreePath, targetGitRef.baseBranch)
+
+       -- 각 파일의 원본/수정본 조회
+       const diffs: DiffFileInfo[] = []
+       for each filePath of changedFiles:
+         let original = ''
+         try:
+           original = await this.gitService.getFileAtRef(workTreePath, targetGitRef.baseBranch, filePath)
+         catch:
+           original = '' -- 새 파일인 경우
+
+         let modified = ''
+         try:
+           const fullPath = join(workTreePath, filePath)
+           modified = await this.fileSystem.readFile(fullPath)
+         catch:
+           modified = '' -- 삭제된 파일인 경우
+
+         diffs.push({ path: filePath, original, modified })
+
+       return diffs
+
+10-5. 백엔드 검증 실행
+
+
+----- Phase 11 백엔드 프레젠테이션 -- 컨트롤러, DTO, 모듈 -- D1~D3 -----
+
+핵심 파일:
+  - flow-backend/src/workspace/infra/in-memory-workspace-repository.ts -- 신규
+  - flow-backend/src/workspace/presentation/workspace.controller.ts -- 신규
+  - flow-backend/src/workspace/presentation/dto/ -- 신규
+  - flow-backend/src/workspace/presentation/workspace.module.ts -- 신규
+  - flow-backend/src/app.module.ts -- 수정
+참조할 코드 -- 읽기만, 수정하지 않음:
+  - flow-backend/src/workflow-runtime/presentation/workflow-runtime.controller.ts -- 컨트롤러 패턴
+  - flow-backend/src/workflow-runtime/presentation/workflow-runtime.module.ts -- 모듈 패턴
+  - flow-backend/src/workflow-runtime/infra/in-memory-* -- 인메모리 리포지토리 패턴
+
+11-1. InMemoryWorkspaceRepository 생성
+
+     기존 인메모리 리포지토리 패턴 참조.
+     Map<string, Workspace>으로 저장.
+     save, findById, findAll, delete 구현.
+
+11-2. DTOs 생성
+
+     CreateWorkspaceDto:
+       @IsString @IsNotEmpty name: string
+       @IsString @IsNotEmpty model: string
+       @IsArray @ValidateNested({ each: true })
+       gitRefs: CreateWorkspaceGitRefDto[]
+       @IsOptional @IsArray
+       mcpServerRefs: { mcpServerId: string; envOverrides?: Record<string, string> }[]
+
+     CreateWorkspaceGitRefDto:
+       @IsString @IsNotEmpty gitId: string
+       @IsString @IsNotEmpty baseBranch: string
+       @IsString @IsNotEmpty branchName: string
+
+     SendChatMessageDto:
+       @IsString @IsNotEmpty message: string
+
+11-3. WorkspaceController 생성
+
+     @Controller('workspaces')
+     @UseGuards(JwtAuthGuard) -- 기존 패턴 따름
+
+     생성자 주입:
+       createWorkspaceUseCase, getWorkspaceQuery, listWorkspacesQuery,
+       deleteWorkspaceUseCase, completeWorkspaceUseCase,
+       sendChatMessageUseCase, getWorkspaceTreeQuery, getWorkspaceFileQuery,
+       getWorkspaceDiffQuery
+
+     @Post() create(@Body() dto: CreateWorkspaceDto)
+     @Get() list()
+     @Get(':id') get(@Param('id') id: string)
+     @Delete(':id') delete(@Param('id') id: string)
+     @Post(':id/complete') complete(@Param('id') id: string)
+     @Post(':id/chat') chat(@Param('id') id: string, @Body() dto: SendChatMessageDto)
+     @Get(':id/tree') tree(@Param('id') id: string)
+     @Get(':id/file') file(@Param('id') id: string, @Query('path') filePath: string)
+     @Get(':id/diff') diff(@Param('id') id: string, @Query('gitId') gitId?: string)
+
+     에이전트 로그 엔드포인트:
+       @Get(':id/agent-logs')
+       async getAgentLogs(@Param('id') id: string)
+         -- 기존 AgentLogRepository 또는 ReadModel을 사용하여
+         -- workspaceId (= workExecutionId로 매핑된 값)로 로그 조회
+
+11-4. WorkspaceModule 생성
+
+     @Module
+     imports: SharedModule (또는 기존 전역 모듈들), GitModule, McpModule, AuthModule
+     controllers: [WorkspaceController]
+     providers: [
+       { provide: WorkspaceRepository, useClass: InMemoryWorkspaceRepository },
+       WorkspacePathFactory,
+       CreateWorkspaceUseCase, GetWorkspaceQuery, ListWorkspacesQuery,
+       DeleteWorkspaceUseCase, CompleteWorkspaceUseCase,
+       SendChatMessageUseCase, GetWorkspaceTreeQuery, GetWorkspaceFileQuery,
+       GetWorkspaceDiffQuery,
+     ]
+
+11-5. AppModule에 WorkspaceModule 등록
+
+     flow-backend/src/app.module.ts의 imports에 WorkspaceModule 추가.
+
+11-6. 백엔드 검증 실행
+
+
+----- Phase 12 프론트엔드 -- API + 타입 + 훅 -----
+
+핵심 파일:
+  - flow-front/src/api/types.ts -- 수정
+  - flow-front/src/api/workspaces.ts -- 신규
+  - flow-front/src/lib/query-keys.ts -- 수정
+  - flow-front/src/hooks/useWorkspaces.ts -- 신규
+
+12-1. 타입 추가 -- flow-front/src/api/types.ts
+
+     // --- Workspace ---
+
+     export type WorkspaceStatus = 'ACTIVE' | 'COMPLETED';
+
+     export interface WorkspaceGitRefResponse {
+       gitId: string;
+       gitUrl: string;
+       baseBranch: string;
+       branchName: string;
+     }
+
+     export interface WorkspaceDetailResponse {
+       id: string;
+       name: string;
+       status: WorkspaceStatus;
+       model: string;
+       path: string;
+       agentSessionId: string | null;
+       createdAt: string;
+       gitRefs: WorkspaceGitRefResponse[];
+       mcpServerRefs: { mcpServerId: string; envOverrides: Record<string, string> }[];
+     }
+
+     export interface WorkspaceListItem {
+       id: string;
+       name: string;
+       status: WorkspaceStatus;
+       model: string;
+       gitRefCount: number;
+       createdAt: string;
+     }
+
+     export interface CreateWorkspaceRequest {
+       name: string;
+       model: string;
+       gitRefs: { gitId: string; baseBranch: string; branchName: string }[];
+       mcpServerRefs?: { mcpServerId: string; envOverrides?: Record<string, string> }[];
+     }
+
+     export interface SendChatMessageRequest {
+       message: string;
+     }
+
+     export interface ChatMessageResponse {
+       response: string;
+     }
+
+     export interface DiffFileInfo {
+       path: string;
+       original: string;
+       modified: string;
+     }
+
+12-2. API 모듈 생성 -- flow-front/src/api/workspaces.ts
+
+     모든 workspace 엔드포인트를 래핑.
+     create, list, get, delete, complete, chat, tree, file, diff, agentLogs.
+
+12-3. 쿼리 키 추가 -- flow-front/src/lib/query-keys.ts
+
+     workspaces: {
+       all: ['workspaces'],
+       detail: (id: string) => ['workspaces', id],
+       tree: (id: string) => ['workspaces', id, 'tree'],
+       file: (id: string, path: string) => ['workspaces', id, 'file', path],
+       diff: (id: string, gitId?: string) => ['workspaces', id, 'diff', gitId ?? 'default'],
+       agentLogs: (id: string) => ['workspaces', id, 'agent-logs'],
+     },
+
+12-4. React Query 훅 생성 -- flow-front/src/hooks/useWorkspaces.ts
+
+     useWorkspaceList():
+       listQuery (refetchInterval: 5000)
+       deleteMutation (invalidate all)
+
+     useWorkspaceDetail(id):
+       detailQuery (refetchInterval: 2s if ACTIVE, false if COMPLETED)
+       completeMutation
+       deleteMutation
+       chatMutation (sendChatMessage → invalidate agentLogs)
+       treeQuery (refetchInterval: 5s if ACTIVE)
+       diffQuery (enabled when tab is diff view)
+
+12-5. 프론트엔드 검증 실행
+
+
+----- Phase 13 프론트엔드 -- 목록 + 생성 페이지 -----
+
+핵심 파일:
+  - flow-front/src/pages/WorkspaceListPage.tsx -- 신규
+  - flow-front/src/pages/WorkspaceCreatePage.tsx -- 신규
+  - flow-front/src/components/layout/Sidebar.tsx -- 수정
+  - flow-front/src/App.tsx -- 수정
+
+13-1. WorkspaceListPage 생성
+
+     기존 WorkflowRunListPage 패턴 참조.
+     DataTable로 워크스페이스 목록 표시:
+       컬럼: 이름, 상태, 모델, Git 프로젝트 수, 생성일, 액션
+     상태 필터: 전체, 활성, 완료
+     행 클릭 → /workspaces/:id
+     "새 워크스페이스" 버튼 → /workspaces/new
+
+13-2. WorkspaceCreatePage 생성
+
+     폼 기반 생성 페이지:
+       이름 입력 (필수)
+       모델 선택 (기존 MODEL_OPTIONS 재사용)
+       Git 레포지토리 선택 + 브랜치명 지정:
+         등록된 Git 목록에서 선택 (useGits 훅 사용)
+         각 선택된 repo에 대해:
+           기본 브랜치 (baseBranch) 입력
+           새 브랜치명 (branchName) 입력
+         추가/삭제 가능
+       MCP 서버 선택 (선택사항):
+         등록된 MCP 서버 목록에서 선택
+       생성 버튼 → createMutation 호출 → 성공 시 /workspaces/:id로 이동
+
+13-3. Sidebar에 네비게이션 추가
+
+     navItems에 추가 (Lineage 다음):
+       { to: '/workspaces', label: 'Workspaces', icon: FolderOpen }
+     lucide-react에서 FolderOpen import.
+
+13-4. App.tsx에 라우트 추가
+
+     /workspaces → WorkspaceListPage
+     /workspaces/new → WorkspaceCreatePage
+     /workspaces/:id → WorkspaceDetailPage (Phase 14에서 생성)
+
+13-5. 프론트엔드 검증 실행
+
+
+----- Phase 14 프론트엔드 -- 상세 페이지 (채팅 + 모나코 diff + 파일 트리) -----
+
+핵심 파일:
+  - flow-front/src/pages/WorkspaceDetailPage.tsx -- 신규
+  - flow-front/src/components/workspace/ChatPanel.tsx -- 신규
+  - flow-front/src/components/workspace/DiffViewerPanel.tsx -- 신규
+참조할 코드 -- 읽기만, 수정하지 않음:
+  - flow-front/src/components/flow/panels/AgentLogPanel.tsx -- 로그 표시 패턴
+  - flow-front/src/components/flow/panels/WorkspaceViewerPanel.tsx -- 파일 트리 + 모나코 패턴
+
+14-1. ChatPanel 컴포넌트 생성
+
+     파일: flow-front/src/components/workspace/ChatPanel.tsx
+
+     Props:
+       workspaceId: string
+       isActive: boolean
+
+     구조:
+       상단: 대화 기록 (에이전트 로그 기반):
+         useQuery로 agentLogs 조회 (refetchInterval: 3s when isActive)
+         에이전트 로그를 대화형으로 표시:
+           - assistant_text → 에이전트 메시지 (좌측, 파란 배경)
+           - tool_use/tool_result → 도구 사용 그룹 (접기/펼치기)
+           - result_summary → 결과 요약
+           - error → 에러 메시지 (빨간 배경)
+         자동 스크롤 (최신 메시지로)
+
+       하단: 메시지 입력:
+         Textarea (여러 줄 입력 가능)
+         전송 버튼 (Send 아이콘)
+         isActive가 false이면 입력 비활성화
+         전송 시 chatMutation 호출
+         전송 중이면 로딩 표시
+
+     -- AgentLogPanel의 렌더링 로직을 재사용하되, 채팅 UI로 재구성
+
+14-2. DiffViewerPanel 컴포넌트 생성
+
+     파일: flow-front/src/components/workspace/DiffViewerPanel.tsx
+
+     Props:
+       workspaceId: string
+       gitId?: string
+
+     구조:
+       useQuery로 diff 데이터 조회 (refetchInterval: 5s)
+       좌측: 변경 파일 목록
+         각 파일: 클릭하면 diff 뷰로 표시
+         파일 아이콘 + 경로
+         변경된 파일 수 표시
+       우측: Monaco DiffEditor
+         import { DiffEditor } from '@monaco-editor/react'
+         DiffEditor 속성:
+           original: 선택된 파일의 original 내용
+           modified: 선택된 파일의 modified 내용
+           language: getLanguageFromPath(selectedFile.path)
+           options:
+             readOnly: true
+             renderSideBySide: true
+             minimap: { enabled: false }
+         파일이 선택되지 않았으면 안내 메시지 표시
+
+14-3. WorkspaceDetailPage 생성
+
+     파일: flow-front/src/pages/WorkspaceDetailPage.tsx
+
+     구조:
+       useParams로 id 추출
+       useWorkspaceDetail(id) 훅 사용
+
+       상단 헤더:
+         PageHeader title: workspace.name
+         상태 배지
+         액션 버튼:
+           완료 버튼 (ACTIVE일 때만) → completeMutation
+           삭제 버튼 → deleteMutation (확인 다이얼로그)
+
+       상단 탭 또는 뷰 모드 선택:
+         파일 탐색 | Diff 뷰 (두 가지 모드)
+
+       메인 레이아웃 -- flex row, h-full:
+         좌측 영역 (flex-1):
+           파일 탐색 모드:
+             기존 WorkspaceViewerPanel과 유사한 파일 트리 + 모나코 에디터
+             -- 읽기 전용이 아닌 경우도 고려하되, 일단 읽기 전용으로 시작
+           Diff 뷰 모드:
+             DiffViewerPanel 컴포넌트
+             git repo 선택 드롭다운 (여러 repo가 있을 때)
+
+         우측 영역 (w-96 또는 w-[400px]):
+           ChatPanel 컴포넌트
+           항상 표시 (접기/펼치기 가능)
+
+       workspace 정보 표시 (상단 또는 사이드에):
+         모델, Git 레포 목록 (브랜치명 포함), MCP 서버 목록
+
+14-4. 프론트엔드 검증 실행
+
+
+----- Phase 15 워크스페이스 통합 검증 -----
+
+15-1. 백엔드 서버 빌드 후 실행:
+     cd flow-backend && npm run build && npm run start
+
+15-2. 프론트엔드 dev 서버 실행:
+     cd flow-front && npm run dev
+
+15-3. Playwright MCP로 다음 시나리오를 검증:
+
+     시나리오 A -- 워크스페이스 목록 페이지:
+       사이드바에서 Workspaces 메뉴 클릭
+       /workspaces 경로로 이동 확인
+       "새 워크스페이스" 버튼 표시 확인
+
+     시나리오 B -- 워크스페이스 생성:
+       "새 워크스페이스" 버튼 클릭 → /workspaces/new 이동
+       이름 입력: "테스트 워크스페이스"
+       모델 선택
+       등록된 Git 레포 선택 + 베이스 브랜치, 새 브랜치명 입력
+       생성 버튼 클릭
+       상세 페이지로 리다이렉트 확인
+
+     시나리오 C -- 채팅 기능:
+       워크스페이스 상세 페이지에서 채팅 패널 확인
+       메시지 입력란에 "안녕하세요. 프로젝트 구조를 설명해주세요." 입력
+       전송 버튼 클릭
+       에이전트 응답이 대화 기록에 표시되는지 확인
+       응답 완료 후 추가 메시지 전송 가능한지 확인
+
+     시나리오 D -- 파일 탐색:
+       파일 탐색 탭/모드 선택
+       좌측 파일 트리에 디렉토리/파일 표시 확인
+       파일 클릭 시 모나코 에디터에 내용 표시 확인
+
+     시나리오 E -- Diff 뷰:
+       에이전트에게 파일 수정 요청 후 (예: "README.md에 설명을 추가해주세요")
+       Diff 뷰 탭/모드 선택
+       변경된 파일 목록 표시 확인
+       파일 선택 시 DiffEditor에 원본/수정본 나란히 표시 확인
+
+     시나리오 F -- 완료 처리:
+       완료 버튼 클릭
+       상태가 COMPLETED로 변경 확인
+       채팅 입력이 비활성화 확인
+
+     시나리오 G -- 삭제:
+       목록 페이지에서 삭제 액션 확인
+       확인 다이얼로그 동작 확인
+
+15-4. 문제 발견 시 즉시 수정하고 재검증
+
+15-5. 최종 검증:
+     cd flow-backend && npm run typecheck && npm run test && npm run lint
+     cd flow-front && npx tsc -b && npm run lint && npm run build
+
+
+========================================================
+=== 파트 D: 브랜치 통합 + 선택적 원격 푸시 (Phase 16~20) ===
+========================================================
+
+브랜치 통합이란:
+  사용자가 리니지 테이블에서 통합할 워크플로우 런을 선택하면,
+  각 프로젝트(git 레포)별로 머지해야 할 브랜치를 집계하고,
+  애드혹 워크스페이스의 에이전트에게 머지 작업을 위임한다.
+  에이전트는 채팅 컨텍스트에서 git merge를 수행한다.
+
+선택적 원격 푸시란:
+  완료된 워크플로우 런 또는 워크스페이스의 로컬 브랜치를 사용자가 선택하여 원격으로 푸시한다.
+  이때 git-safety에서 추가한 GitService.push 메서드를 사용한다.
+  pre-push hook이 설치되어 있으므로, 먼저 hook을 임시 해제하고 push 후 재설치한다.
+
+수정할 항목 목록:
+  A1. PushBranchesUseCase 생성 (워크플로우 런용)
+  A2. PushWorkspaceBranchesUseCase 생성 (워크스페이스용)
+  A3. 런타임 컨트롤러에 push 엔드포인트 추가
+  A4. 워크스페이스 컨트롤러에 push 엔드포인트 추가
+  B1. MergeBranchesUseCase 생성
+  B2. 워크스페이스 컨트롤러에 merge 엔드포인트 추가
+  C1. 프론트엔드 워크플로우 런 푸시 UI
+  C2. 프론트엔드 워크스페이스 푸시 UI
+  D1. 프론트엔드 리니지 통합 UI
+
+
+----- Phase 16 백엔드 -- PushBranchesUseCase + 엔드포인트 -- A1~A4 -----
+
+핵심 파일:
+  - flow-backend/src/workflow-runtime/application/commands/push-branches-use-case.ts -- 신규
+  - flow-backend/src/workspace/application/commands/push-workspace-branches-use-case.ts -- 신규
+  - flow-backend/src/workflow-runtime/presentation/workflow-runtime.controller.ts -- 수정
+  - flow-backend/src/workspace/presentation/workspace.controller.ts -- 수정
+  - flow-backend/src/workflow-runtime/presentation/workflow-runtime.module.ts -- 수정
+  - flow-backend/src/workspace/presentation/workspace.module.ts -- 수정
+참조할 코드 -- 읽기만, 수정하지 않음:
+  - flow-backend/src/git/domain/ports/git-client.ts -- push, installPrePushHook
+  - flow-backend/src/common/ports/git-service.ts -- push, installPrePushHook
+  - flow-backend/src/workflow-runtime/domain/entities/work-tree.ts -- WorkTree
+  - flow-backend/src/workflow-runtime/domain/ports/work-tree-repository.ts
+
+16-1. 푸시 결과 인터페이스 정의
+
+     공통 파일 또는 각 UseCase 파일 상단에 정의:
+
+     export interface PushResult:
+       gitId -- string
+       branch -- string
+       success -- boolean
+       error -- string 또는 null
+
+     export interface PushBranchesResult:
+       results -- PushResult 배열
+
+16-2. PushBranchesUseCase 생성 (워크플로우 런용)
+
+     파일: flow-backend/src/workflow-runtime/application/commands/push-branches-use-case.ts
+
+     @Injectable 데코레이터
+     생성자 주입:
+       - WorkflowRunRepository
+       - WorkTreeRepository
+       - GitService
+       - GitReader
+
+     async execute(workflowRunId: WorkflowRunId): Promise<PushBranchesResult>
+
+     execute 로직:
+       1. run = await workflowRunRepository.findById(workflowRunId)
+          없으면 에러
+
+       2. COMPLETED 상태 확인:
+          if run.status !== WorkflowRunStatus.COMPLETED then
+            throw ApplicationError: '완료된 워크플로우 런만 푸시할 수 있습니다.'
+
+       3. WorkTree 목록 조회:
+          const workTrees = await workTreeRepository.findByWorkflowRunId(workflowRunId)
+          if workTrees.length === 0 then return { results: [] }
+
+       4. git 정보 조회:
+          const gitInfos = await gitReader.findByIds(workTrees.map(wt => wt.gitId))
+
+       5. 각 worktree에 대해 push 수행:
+          const results: PushResult[] = []
+          for each wt of workTrees:
+            const gitInfo = gitInfos.find(g => g.id === wt.gitId)
+            if not gitInfo then
+              results.push({ gitId: wt.gitId, branch: wt.branch, success: false, error: 'Git 레포 정보를 찾을 수 없습니다.' })
+              continue
+
+            try:
+              -- 현재 브랜치명 확인
+              const currentBranch = await this.gitService.getCurrentBranch(wt.path)
+
+              -- pre-push hook 임시 제거 후 push 후 재설치.
+              -- CliGitClient.push에서 hook 파일을 임시 이름(.pre-push.bak)으로 변경하여 우회.
+              -- 자세한 구현은 아래 주의 참조.
+
+              await this.gitService.push(wt.path, currentBranch)
+
+              results.push({ gitId: wt.gitId, branch: currentBranch, success: true, error: null })
+            catch err:
+              results.push({
+                gitId: wt.gitId,
+                branch: wt.branch,
+                success: false,
+                error: err instanceof Error ? err.message : String(err),
+              })
+
+          return { results }
+
+     주의: CliGitClient.push 메서드에 pre-push hook 우회 로직 추가가 필요할 수 있다.
+       기존 push 메서드를 수정:
+         async push(repoPath: string, branch: string): Promise<void>
+           -- worktree의 git dir에서 pre-push hook 파일을 임시로 이름 변경
+           const gitDir = await this.resolveGitDir(repoPath)
+           const hookPath = join(gitDir, 'hooks', 'pre-push')
+           const backupPath = hookPath + '.bak'
+           let hookExists = false
+           try:
+             await rename(hookPath, backupPath)
+             hookExists = true
+           catch:
+             무시 -- hook이 없는 경우
+
+           try:
+             await this.exec(repoPath, ['push', 'origin', '--', branch])
+           finally:
+             if hookExists:
+               try: await rename(backupPath, hookPath)
+               catch: 무시
+
+       resolveGitDir 헬퍼 메서드 추가:
+         private async resolveGitDir(repoPath: string): Promise<string>
+           const gitPath = join(repoPath, '.git')
+           try:
+             const content = await readFile(gitPath, 'utf-8')
+             if content.startsWith('gitdir:'):
+               return content.replace('gitdir:', '').trim()
+           catch:
+             무시
+           return gitPath
+
+       import 추가: rename from node:fs/promises
+
+16-3. PushWorkspaceBranchesUseCase 생성 (워크스페이스용)
+
+     파일: flow-backend/src/workspace/application/commands/push-workspace-branches-use-case.ts
+
+     PushBranchesUseCase와 유사한 구조이되 WorkspaceRepository 사용.
+
+     @Injectable 데코레이터
+     생성자 주입: WorkspaceRepository, GitService, GitReader
+
+     async execute(workspaceId: WorkspaceId): Promise<PushBranchesResult>
+       workspace = await workspaceRepository.findById(workspaceId)
+       없으면 에러
+       if workspace.status !== WorkspaceStatus.COMPLETED then 에러
+
+       const gitInfos = await gitReader.findByIds(workspace.gitRefs.map(r => r.gitId))
+
+       const results: PushResult[] = []
+       for each gitRef of workspace.gitRefs:
+         const gitInfo = gitInfos.find(g => g.id === gitRef.gitId)
+         -- workspace의 worktree 경로 계산
+         -- workspace.path 내의 symlink를 통해 경로를 찾거나 pathFactory 사용
+         const workTreePath = -- 경로 결정
+
+         try:
+           await gitService.push(workTreePath, gitRef.branchName)
+           results.push({ gitId: gitRef.gitId, branch: gitRef.branchName, success: true, error: null })
+         catch err:
+           results.push({
+             gitId: gitRef.gitId, branch: gitRef.branchName, success: false,
+             error: err instanceof Error ? err.message : String(err),
+           })
+
+       return { results }
+
+16-4. 런타임 컨트롤러에 push 엔드포인트 추가
+
+     @Post(':id/push')
+     @HttpCode(200)
+     async pushBranches(@Param('id', BrandedIdPipe(WorkflowRunId)) id: WorkflowRunId)
+       return this.pushBranchesUseCase.execute(id)
+
+     생성자에 PushBranchesUseCase 주입.
+     모듈의 providers에 PushBranchesUseCase 추가.
+
+16-5. 워크스페이스 컨트롤러에 push 엔드포인트 추가
+
+     @Post(':id/push')
+     @HttpCode(200)
+     async pushBranches(@Param('id') id: string)
+       return this.pushWorkspaceBranchesUseCase.execute(WorkspaceId.create(id))
+
+     생성자에 PushWorkspaceBranchesUseCase 주입.
+     모듈의 providers에 PushWorkspaceBranchesUseCase 추가.
+
+16-6. 백엔드 검증 실행
+
+
+----- Phase 17 백엔드 -- MergeBranchesUseCase -- B1, B2 -----
+
+핵심 파일:
+  - flow-backend/src/workspace/application/commands/merge-branches-use-case.ts -- 신규
+  - flow-backend/src/workspace/presentation/workspace.controller.ts -- 수정
+  - flow-backend/src/workspace/presentation/dto/merge-branches.dto.ts -- 신규
+  - flow-backend/src/workspace/presentation/workspace.module.ts -- 수정
+참조할 코드 -- 읽기만, 수정하지 않음:
+  - flow-backend/src/workspace/application/commands/send-chat-message-use-case.ts -- 채팅 위임 패턴
+  - flow-backend/src/workflow-runtime/domain/ports/work-tree-repository.ts -- WorkTree 조회
+
+17-1. MergeBranchesUseCase 생성
+
+     @Injectable 데코레이터
+     생성자 주입:
+       - WorkspaceRepository
+       - WorkTreeRepository (workflow-runtime 도메인에서 가져옴)
+       - WorkflowRunRepository (workflow-runtime 도메인에서 가져옴)
+       - AgentService
+       - GitReader
+
+     MergeBranchesCommand 인터페이스:
+       workspaceId: WorkspaceId
+       workflowRunIds: string[] -- 통합할 워크플로우 런 ID 목록
+
+     async execute(command: MergeBranchesCommand): Promise<{ response: string }>
+
+     execute 로직:
+       1. workspace = await workspaceRepository.findById(command.workspaceId)
+          없으면 에러
+          if not workspace.isActive() then 에러
+
+       2. 각 워크플로우 런에서 브랜치 정보 수집:
+          -- gitId별로 머지할 브랜치 목록 집계
+          const mergePlan = new Map<string, { gitId: string; branches: string[] }>()
+
+          for each runId of command.workflowRunIds:
+            const workTrees = await workTreeRepository.findByWorkflowRunId(
+              WorkflowRunId.create(runId)
+            )
+            for each wt of workTrees:
+              const existing = mergePlan.get(wt.gitId) ?? { gitId: wt.gitId, branches: [] }
+              -- 현재 브랜치명 확인 (worktree에서)
+              const branchName = wt.branch -- 또는 실제 getCurrentBranch 호출
+              if not existing.branches.includes(branchName):
+                existing.branches.push(branchName)
+              mergePlan.set(wt.gitId, existing)
+
+       3. 머지 계획을 채팅 메시지로 구성:
+          const gitInfos = await gitReader.findByIds([...mergePlan.keys()])
+
+          let message = '다음 브랜치들을 현재 워크스페이스의 각 프로젝트에 머지해주세요.\n\n'
+          for each [gitId, plan] of mergePlan:
+            const gitInfo = gitInfos.find(g => g.id === gitId)
+            const projectName = gitInfo?.url.split('/').pop()?.replace('.git', '') ?? gitId
+            message += '프로젝트: ' + projectName + '\n'
+            message += '머지할 브랜치: ' + plan.branches.join(', ') + '\n'
+            -- workspace에서 해당 gitId의 브랜치명 확인
+            const wsGitRef = workspace.gitRefs.find(r => r.gitId === gitId)
+            if wsGitRef:
+              message += '현재 브랜치: ' + wsGitRef.branchName + '\n'
+            message += '\n'
+
+          message += '각 프로젝트 디렉토리에서 git merge 명령으로 브랜치를 통합해주세요. '
+          message += '충돌이 발생하면 적절히 해결해주세요.'
+
+       4. 에이전트에게 메시지 전송:
+          const result = await agentService.sendQueryForWorkspace(
+            workspace.id, message
+          )
+
+          return { response: result.response }
+
+17-2. DTO 생성
+
+     파일: flow-backend/src/workspace/presentation/dto/merge-branches.dto.ts
+
+     export class MergeBranchesDto:
+       @IsArray()
+       @IsString({ each: true })
+       workflowRunIds: string[]
+
+17-3. 워크스페이스 컨트롤러에 merge 엔드포인트 추가
+
+     @Post(':id/merge')
+     @HttpCode(200)
+     async mergeBranches(
+       @Param('id') id: string,
+       @Body() dto: MergeBranchesDto,
+     )
+       return this.mergeBranchesUseCase.execute({
+         workspaceId: WorkspaceId.create(id),
+         workflowRunIds: dto.workflowRunIds,
+       })
+
+     생성자에 MergeBranchesUseCase 주입.
+     모듈에 등록:
+       providers에 MergeBranchesUseCase 추가.
+       WorkflowRunRepository, WorkTreeRepository를 inject 하려면
+       WorkflowRuntimeModule에서 export하거나 SharedModule에서 제공해야 한다.
+       기존 모듈 간 의존성을 확인하고 적절히 import를 추가한다.
+
+17-4. 백엔드 검증 실행
+
+
+----- Phase 18 프론트엔드 -- 푸시 UI -- C1, C2 -----
+
+핵심 파일:
+  - flow-front/src/api/types.ts -- 수정
+  - flow-front/src/api/workflow-runs.ts -- 수정
+  - flow-front/src/api/workspaces.ts -- 수정
+  - flow-front/src/hooks/useWorkflowRuns.ts -- 수정
+  - flow-front/src/hooks/useWorkspaces.ts -- 수정
+  - flow-front/src/pages/WorkflowRunFlowPage.tsx -- 수정
+  - flow-front/src/pages/WorkspaceDetailPage.tsx -- 수정
+  - flow-front/src/components/PushResultDialog.tsx -- 신규
+참조할 코드 -- 읽기만, 수정하지 않음:
+  - flow-front/src/components/ConfirmDialog.tsx -- 다이얼로그 패턴
+
+18-1. 타입 추가 -- flow-front/src/api/types.ts
+
+     export interface PushResult {
+       gitId: string;
+       branch: string;
+       success: boolean;
+       error: string | null;
+     }
+
+     export interface PushBranchesResult {
+       results: PushResult[];
+     }
+
+18-2. API 모듈 수정
+
+     workflow-runs.ts에 추가:
+       pushBranches: (id: string) =>
+         apiClient.post<unknown, PushBranchesResult>('/workflow-runs/' + id + '/push')
+
+     workspaces.ts에 추가:
+       pushBranches: (id: string) =>
+         apiClient.post<unknown, PushBranchesResult>('/workspaces/' + id + '/push')
+
+18-3. 훅 수정
+
+     useWorkflowRunDetail에 pushMutation 추가:
+       mutationFn: () => workflowRunsApi.pushBranches(id)
+       onSuccess: invalidate detail
+
+     useWorkspaceDetail에 pushMutation 추가:
+       mutationFn: () => workspacesApi.pushBranches(id)
+       onSuccess: invalidate detail
+
+18-4. PushResultDialog 컴포넌트 생성
+
+     파일: flow-front/src/components/PushResultDialog.tsx
+
+     Props:
+       open: boolean
+       onClose: () => void
+       results: PushResult[] | null
+
+     구조:
+       Dialog 컴포넌트 (기존 ui/dialog 사용):
+         제목: "원격 푸시 결과"
+         결과 테이블:
+           컬럼: 프로젝트, 브랜치, 결과
+           각 행:
+             프로젝트: gitId (또는 URL에서 추출한 이름)
+             브랜치: branch
+             결과: success이면 체크마크 + 성공, 아니면 X + 에러 메시지
+         닫기 버튼
+
+18-5. WorkflowRunFlowPage에 푸시 버튼 추가
+
+     COMPLETED 상태일 때 상단 액션 영역에 버튼 추가:
+       Button variant=default size=sm:
+         Upload 아이콘 (lucide-react)
+         "원격 푸시"
+       onClick: 확인 다이얼로그 표시 후 pushMutation.mutate()
+       pushMutation 성공 시: PushResultDialog 열기
+
+     확인 다이얼로그:
+       "로컬 브랜치를 원격 저장소로 푸시합니다. 계속하시겠습니까?"
+
+     PushResultDialog:
+       open: pushResultOpen 상태
+       results: pushMutation.data?.results
+
+     import 추가: PushResultDialog, Upload from lucide-react
+
+18-6. WorkspaceDetailPage에 푸시 버튼 추가
+
+     WorkflowRunFlowPage와 동일한 패턴.
+     COMPLETED 상태일 때만 표시.
+
+18-7. 프론트엔드 검증 실행
+
+
+----- Phase 19 프론트엔드 -- 리니지 통합 UI -- D1 -----
+
+핵심 파일:
+  - flow-front/src/api/types.ts -- 수정
+  - flow-front/src/api/workspaces.ts -- 수정
+  - flow-front/src/hooks/useWorkspaces.ts -- 수정
+  - flow-front/src/pages/WorkLineagePage.tsx -- 수정
+  - flow-front/src/components/MergeDialog.tsx -- 신규
+참조할 코드 -- 읽기만, 수정하지 않음:
+  - flow-front/src/components/ConfirmDialog.tsx -- 다이얼로그 패턴
+  - flow-front/src/hooks/useWorkspaces.ts -- workspace 목록 조회
+
+19-1. 타입 추가
+
+     export interface MergeBranchesRequest {
+       workflowRunIds: string[];
+     }
+
+     export interface MergeBranchesResponse {
+       response: string;
+     }
+
+19-2. API 모듈에 merge 추가
+
+     workspaces.ts에 추가:
+       mergeBranches: (workspaceId: string, data: MergeBranchesRequest) =>
+         apiClient.post<unknown, MergeBranchesResponse>(
+           '/workspaces/' + workspaceId + '/merge', data
+         )
+
+19-3. MergeDialog 컴포넌트 생성
+
+     파일: flow-front/src/components/MergeDialog.tsx
+
+     Props:
+       open: boolean
+       onClose: () => void
+       selectedRunIds: string[] -- 선택된 워크플로우 런 ID 목록
+       onMerge: (workspaceId: string) => void
+
+     구조:
+       Dialog:
+         제목: "브랜치 통합"
+         설명: "선택한 워크플로우의 브랜치를 워크스페이스로 머지합니다."
+
+         워크스페이스 선택:
+           ACTIVE 상태의 워크스페이스 목록을 useWorkspaceList로 조회
+           Select 또는 Combobox로 워크스페이스 선택
+           selectedWorkspaceId 상태
+
+         선택된 런 요약:
+           "X개의 워크플로우 런이 선택되었습니다."
+
+         통합 버튼:
+           disabled: selectedWorkspaceId가 없으면
+           onClick: onMerge(selectedWorkspaceId)
+
+         취소 버튼
+
+19-4. WorkLineagePage 수정
+
+     체크박스 선택 기능 추가:
+       useState<Set<string>> 으로 selectedRunIds 관리
+
+       각 워크플로우 런 행에 체크박스 추가:
+         checked: selectedRunIds.has(runInfo.workflowRunId)
+         onChange: 토글
+
+       상단 액션 영역에 "통합" 버튼 추가:
+         disabled: selectedRunIds.size === 0
+         onClick: MergeDialog 열기
+
+     MergeDialog:
+       open: mergeDialogOpen 상태
+       selectedRunIds: [...selectedRunIds]
+       onMerge: async (workspaceId) => {
+         await workspacesApi.mergeBranches(workspaceId, {
+           workflowRunIds: [...selectedRunIds],
+         })
+         -- 성공 시:
+         setMergeDialogOpen(false)
+         setSelectedRunIds(new Set())
+         -- 해당 워크스페이스 상세 페이지로 이동 (선택적)
+         navigate('/workspaces/' + workspaceId)
+       }
+
+     체크박스 UI:
+       각 확장된 테이블의 런 행에:
+         td 추가 (체크박스 컬럼):
+           input type=checkbox
+           COMPLETED 상태인 런만 체크 가능
+           RUNNING 등은 비활성화
+
+19-5. 프론트엔드 검증 실행
+
+
+----- Phase 20 최종 통합 검증 -----
+
+20-1. 백엔드 서버 빌드 후 실행:
+     cd flow-backend && npm run build && npm run start
+
+20-2. 프론트엔드 dev 서버 실행:
+     cd flow-front && npm run dev
+
+20-3. Playwright MCP로 다음 시나리오를 검증:
+
+     시나리오 A -- 워크플로우 런 원격 푸시:
+       완료된 워크플로우 런 상세 페이지 (/workflow-runs/:id) 접속
+       "원격 푸시" 버튼 표시 확인
+       버튼 클릭 → 확인 다이얼로그 표시
+       확인 클릭 → 푸시 실행
+       PushResultDialog에 프로젝트별 결과 표시 확인
+
+     시나리오 B -- 워크스페이스 원격 푸시:
+       완료된 워크스페이스 상세 페이지 접속
+       "원격 푸시" 버튼 표시 확인 (COMPLETED 상태에서만)
+       ACTIVE 상태에서는 표시되지 않는지 확인
+
+     시나리오 C -- 리니지에서 브랜치 통합:
+       /work-lineage 페이지 접속
+       완료된 런의 체크박스 선택 (1개 이상)
+       "통합" 버튼 활성화 확인
+       클릭 → MergeDialog 열림
+       ACTIVE 워크스페이스 목록에서 선택
+       "통합" 버튼 클릭 → 머지 요청 실행
+       성공 시 워크스페이스 상세 페이지로 이동 확인
+       채팅 패널에 머지 관련 에이전트 메시지 표시 확인
+
+     시나리오 D -- 실행 중인 런은 푸시 불가:
+       RUNNING 상태의 런 상세 페이지에서 "원격 푸시" 버튼이 없는지 확인
+
+     시나리오 E -- 실행 중인 런은 체크 불가:
+       리니지 페이지에서 RUNNING 상태의 런은 체크박스가 비활성화인지 확인
+
+20-4. 문제 발견 시 즉시 수정하고 재검증
+
+20-5. 최종 검증:
+     cd flow-backend && npm run typecheck && npm run test && npm run lint
+     cd flow-front && npx tsc -b && npm run lint && npm run build
+
+========================================================
+=== 파트 E: 대화형 워크플로우 빌더 (Phase 21~25) ===
+========================================================
+
+대화형 워크플로우 빌더란:
+  에이전트와 채팅하면서 워크플로우를 설계하는 기능이다.
+  사용자가 필요한 작업을 자연어로 설명하면 에이전트가 적절한 WorkDefinition과 TaskDefinition을 구성한다.
+  에이전트는 읽기전용 워크트리를 통해 실제 코드를 탐색하며 어떤 작업이 필요한지 파악한다.
+  좌측 채팅 패널과 우측 라이브 캔버스 프리뷰로 구성된 분할 레이아웃을 사용한다.
+
+워크트리 공유 정책:
+  동일한 gitId + baseBranch 조합의 워크트리가 이미 존재하면 새로 생성하지 않고 공유한다.
+  빌더 세션의 워크트리는 읽기전용이다 -- 새 브랜치를 생성하지 않는다.
+  기존 워크트리가 없는 경우에만 baseBranch를 체크아웃한 읽기전용 워크트리를 생성한다.
+
+수정할 항목 목록:
+  A1. Workspace 엔티티에 purpose 필드 추가 -- general 또는 workflow_builder
+  A2. 읽기전용 워크트리 생성 그리고 공유 로직
+  A3. BuildWorkflowFromSessionUseCase -- 에이전트 출력을 파싱하여 워크플로우 생성
+  A4. 워크플로우 빌더 시스템 프롬프트 구성
+  B1. 컨트롤러에 빌더 전용 엔드포인트 추가
+  B2. 워크플로우 프리뷰 파싱 쿼리
+  C1. 프론트엔드 타입 + API
+  C2. WorkflowBuilderPage -- 채팅 + 라이브 캔버스 분할 레이아웃
+  C3. 라이브 프리뷰 파싱 + 렌더링
+
+
+----- Phase 21 백엔드 -- 워크스페이스 확장 + 읽기전용 워크트리 -----
+
+핵심 파일:
+  - flow-backend/src/workspace/domain/entities/workspace.ts -- 수정
+  - flow-backend/src/workspace/domain/value-objects/ -- 수정 또는 추가
+  - flow-backend/src/workspace/application/commands/create-workspace-use-case.ts -- 수정
+참조할 코드 -- 읽기만, 수정하지 않음:
+  - flow-backend/src/workflow/domain/entities/workflow.ts -- 워크플로우 엔티티 구조
+  - flow-backend/src/workflow/presentation/dto/create-workflow.dto.ts -- 생성 DTO 구조
+
+21-1. WorkspacePurpose 열거형 추가
+     flow-backend/src/workspace/domain/value-objects/ 디렉토리에 추가.
+     WorkspacePurpose 열거형: GENERAL = 'GENERAL', WORKFLOW_BUILDER = 'WORKFLOW_BUILDER'
+     index.ts에 export 추가.
+
+21-2. Workspace 엔티티에 purpose 필드 추가
+     workspace.ts를 수정한다.
+     WorkspaceFromProps에 purpose: WorkspacePurpose 추가.
+     WorkspaceCreateProps에 purpose: WorkspacePurpose 추가.
+     private _purpose 필드 추가. getter 추가.
+     create 정적 메서드에서 props.purpose를 할당.
+     기존 코드 하위호환: purpose 기본값은 GENERAL.
+
+21-3. CreateWorkspaceUseCase에 읽기전용 워크트리 공유 로직 추가
+     create-workspace-use-case.ts를 수정한다.
+
+     CreateWorkspaceCommand에 purpose 필드 추가 -- 기본값 GENERAL.
+     purpose가 WORKFLOW_BUILDER인 경우의 워크트리 생성 로직을 분기한다.
+
+     WORKFLOW_BUILDER 분기:
+       각 gitRef에 대해:
+         -- 기존 워크트리가 있는지 확인
+         -- WorkTree 엔티티 또는 파일시스템에서 동일 gitId + baseBranch 조합을 검색
+         -- 방법 1: WorkTreeRepository에 findByGitIdAndBranch 메서드 추가
+         -- 방법 2: 워크트리 경로를 규칙 기반으로 계산하여 파일시스템 존재 여부 확인
+         const existingTrees = await this.workTreeRepository.findByGitId(gitRef.gitId)
+         const sharedTree = existingTrees.find(
+           t => t.branch === gitRef.baseBranch 또는 t.baseBranch === gitRef.baseBranch
+         )
+
+         if sharedTree:
+           -- 기존 워크트리를 symlink로 공유
+           const linkPath = join(workspace.path, gitRef.gitId)
+           await this.fileSystem.createSymlink(sharedTree.path, linkPath)
+         else:
+           -- 새 읽기전용 워크트리 생성
+           -- 새 브랜치를 만들지 않음: baseBranch를 직접 체크아웃
+           const readOnlyTreePath = this.workspacePathFactory.workTreePath(
+             workspace.id, gitRef.gitId
+           )
+           -- git worktree add --detach 사용: 브랜치를 새로 만들지 않고 HEAD를 detach
+           await this.gitService.createReadOnlyWorktree({
+             repoPath: gitInfo.localPath,
+             worktreePath: readOnlyTreePath,
+             ref: gitRef.baseBranch,
+           })
+           -- symlink 생성
+           const linkPath = join(workspace.path, gitRef.gitId)
+           await this.fileSystem.createSymlink(readOnlyTreePath, linkPath)
+
+     GitClient/GitService에 createReadOnlyWorktree 메서드 추가가 필요:
+       git worktree add --detach <path> <ref>
+       이 명령은 새 브랜치를 생성하지 않고 detached HEAD 상태로 워크트리를 만든다.
+       GitClient 포트에 추가:
+         abstract createReadOnlyWorktree -- repoPath, worktreePath, ref -- Promise of void
+       CliGitClient 구현:
+         await this.exec(repoPath, ['worktree', 'add', '--detach', worktreePath, ref])
+       GitService 포트 + GitServiceImpl에 위임 메서드 추가.
+
+     WORKFLOW_BUILDER인 경우 에이전트 시작 시 시스템 프롬프트에 워크플로우 스키마 정보를 포함한다.
+     -- 시스템 프롬프트 구성은 Phase 22에서 상세화.
+
+     GENERAL인 경우 기존 로직 유지 -- 새 브랜치 + pre-push hook.
+
+21-4. WorkTreeRepository에 검색 메서드 추가
+     work-tree-repository.ts 포트에 추가:
+       abstract findByGitId -- gitId: string -- Promise of WorkTree 배열
+     InMemoryWorkTreeRepository에 구현:
+       entries를 필터하여 gitId가 일치하는 항목 반환.
+
+21-5. DeleteWorkspaceUseCase 수정
+     purpose가 WORKFLOW_BUILDER인 경우:
+       읽기전용 워크트리는 공유된 것이므로 원본을 삭제하지 않는다.
+       symlink만 제거하고 워크스페이스 디렉토리를 삭제한다.
+       새로 생성된 detached 워크트리만 삭제한다 -- 공유된 것은 건드리지 않음.
+
+21-6. 백엔드 검증 실행
+
+
+----- Phase 22 백엔드 -- 빌더 시스템 프롬프트 + 워크플로우 생성 유스케이스 -----
+
+핵심 파일:
+  - flow-backend/src/workspace/application/commands/build-workflow-from-session-use-case.ts -- 신규
+  - flow-backend/src/workspace/application/queries/parse-workflow-preview-query.ts -- 신규
+  - flow-backend/src/workspace/application/workflow-builder-prompt.ts -- 신규
+  - flow-backend/src/workspace/presentation/workspace.controller.ts -- 수정
+  - flow-backend/src/workspace/presentation/dto/build-workflow.dto.ts -- 신규
+참조할 코드 -- 읽기만, 수정하지 않음:
+  - flow-backend/src/workflow/application/commands/create-workflow-use-case.ts -- 워크플로우 생성 패턴
+  - flow-backend/src/workflow/presentation/dto/create-workflow.dto.ts -- DTO 구조
+
+22-1. 워크플로우 빌더 시스템 프롬프트 템플릿 생성
+     파일: flow-backend/src/workspace/application/workflow-builder-prompt.ts
+
+     export function buildWorkflowBuilderSystemPrompt 함수 생성.
+     파라미터:
+       availableGits -- { id, url, branches }[]
+       availableMcpServers -- { id, name, description }[]
+       availableModels -- string[]
+
+     반환: 시스템 프롬프트 문자열.
+
+     프롬프트 내용 (핵심):
+       당신은 워크플로우 설계를 도와주는 어시스턴트입니다.
+       사용자의 요구사항을 파악하여 워크플로우를 설계합니다.
+       실제 코드를 탐색하여 필요한 작업을 파악할 수 있습니다.
+
+       워크플로우 구조 설명:
+         Workflow: name, description, branchStrategy, workDefinitions, gitRefs, mcpServerRefs, seedKeys
+         WorkDefinition: order, model, pauseAfter, reportFileRefs, gitRefs, mcpServerRefs, taskDefinitions
+         TaskDefinition: order, query, reportOutline -- sections 배열
+
+       사용 가능한 리소스:
+         Git: [등록된 Git 목록]
+         MCP: [등록된 MCP 서버 목록]
+         모델: [사용 가능한 모델 목록]
+
+       워크플로우 정의를 제안할 때는 반드시 다음 JSON 형식으로 출력하세요:
+       WORKFLOW_DEFINITION_START
+       [워크플로우 정의 JSON]
+       WORKFLOW_DEFINITION_END
+
+       이 마커 사이의 JSON은 자동으로 파싱되어 프리뷰에 반영됩니다.
+
+     주의: 프롬프트는 shell-safe일 필요 없음 -- 프로그래밍적으로 전달됨.
+
+22-2. CreateWorkspaceUseCase 수정 -- 빌더 세션의 시스템 프롬프트 설정
+     create-workspace-use-case.ts를 수정한다.
+     purpose가 WORKFLOW_BUILDER인 경우:
+       gitReader, mcpServerReader에서 사용 가능한 리소스 목록 조회.
+       buildWorkflowBuilderSystemPrompt 호출하여 시스템 프롬프트 생성.
+       에이전트 세션 시작 시 이 시스템 프롬프트를 전달.
+
+22-3. ParseWorkflowPreviewQuery 생성
+     파일: flow-backend/src/workspace/application/queries/parse-workflow-preview-query.ts
+
+     @Injectable 데코레이터
+     생성자 주입: AgentLogRepository
+
+     async execute -- workspaceId: string -- Promise of WorkflowPreview 또는 null
+
+     WorkflowPreview 인터페이스:
+       name -- string
+       description -- string
+       branchStrategy -- string
+       gitRefs -- { gitId, baseBranch }[]
+       mcpServerRefs -- { mcpServerId, envOverrides }[]
+       seedKeys -- string[]
+       workDefinitions -- WorkDefinitionPreview[]
+
+     WorkDefinitionPreview 인터페이스:
+       order -- number
+       model -- string
+       pauseAfter -- boolean
+       reportFileRefs -- number[]
+       taskDefinitions -- { order, query, reportOutline }[]
+
+     execute 로직:
+       1. 에이전트 로그에서 가장 최근의 assistant_text 엔트리를 역순으로 탐색.
+       2. WORKFLOW_DEFINITION_START 와 WORKFLOW_DEFINITION_END 마커를 찾는다.
+       3. 마커 사이의 텍스트를 JSON으로 파싱.
+       4. 파싱 실패 시 null 반환.
+       5. 파싱 성공 시 WorkflowPreview 객체로 변환하여 반환.
+       6. 기본 유효성 검사: name, workDefinitions 배열 존재 여부.
+
+22-4. BuildWorkflowFromSessionUseCase 생성
+     파일: flow-backend/src/workspace/application/commands/build-workflow-from-session-use-case.ts
+
+     @Injectable 데코레이터
+     생성자 주입:
+       - WorkspaceRepository
+       - ParseWorkflowPreviewQuery
+       - CreateWorkflowUseCase -- 기존 워크플로우 생성 유스케이스 재사용
+
+     async execute -- workspaceId: WorkspaceId -- Promise of { workflowId: string }
+
+     execute 로직:
+       1. workspace = await workspaceRepository.findById(workspaceId)
+          없으면 에러.
+          purpose가 WORKFLOW_BUILDER가 아니면 에러.
+
+       2. preview = await parseWorkflowPreviewQuery.execute(workspaceId)
+          null이면 에러: '워크플로우 정의를 찾을 수 없습니다. 에이전트에게 워크플로우 정의를 요청하세요.'
+
+       3. 기존 CreateWorkflowUseCase를 호출하여 워크플로우 생성:
+          const result = await this.createWorkflowUseCase.execute({
+            name: preview.name,
+            description: preview.description,
+            branchStrategy: preview.branchStrategy,
+            gitRefs: preview.gitRefs,
+            mcpServerRefs: preview.mcpServerRefs,
+            seedKeys: preview.seedKeys,
+            workDefinitions: preview.workDefinitions,
+          })
+
+          return { workflowId: result.id }
+
+22-5. 워크스페이스 컨트롤러에 빌더 엔드포인트 추가
+
+     GET :id/workflow-preview
+       parseWorkflowPreviewQuery.execute 호출
+       null이면 빈 응답 반환
+
+     POST :id/build-workflow
+       buildWorkflowFromSessionUseCase.execute 호출
+       성공 시 { workflowId } 반환
+
+     모듈의 providers에 ParseWorkflowPreviewQuery, BuildWorkflowFromSessionUseCase 등록.
+
+22-6. DTO 생성
+     CreateWorkspaceDto에 purpose 필드 추가:
+       @IsOptional @IsEnum(WorkspacePurpose) purpose?: string
+       기본값: GENERAL
+
+22-7. 백엔드 검증 실행
+
+
+----- Phase 23 프론트엔드 -- 타입 + API + 훅 -----
+
+핵심 파일:
+  - flow-front/src/api/types.ts -- 수정
+  - flow-front/src/api/workspaces.ts -- 수정
+  - flow-front/src/hooks/useWorkspaces.ts -- 수정
+  - flow-front/src/lib/query-keys.ts -- 수정
+
+23-1. 타입 추가 -- types.ts
+
+     WorkflowPreview 인터페이스:
+       name: string
+       description: string
+       branchStrategy: string
+       gitRefs: { gitId: string; baseBranch: string }[]
+       mcpServerRefs: { mcpServerId: string; envOverrides: Record of string to string }[]
+       seedKeys: string[]
+       workDefinitions: WorkDefinitionPreview[]
+
+     WorkDefinitionPreview 인터페이스:
+       order: number
+       model: string
+       pauseAfter: boolean
+       reportFileRefs: number[]
+       taskDefinitions: { order: number; query: string; reportOutline: ReportOutlineData 또는 null }[]
+
+     CreateWorkspaceRequest에 purpose 필드 추가:
+       purpose?: 'GENERAL' 또는 'WORKFLOW_BUILDER'
+
+     WorkspaceDetailResponse에 purpose 필드 추가:
+       purpose: string
+
+     BuildWorkflowResponse 인터페이스:
+       workflowId: string
+
+23-2. API 모듈에 빌더 함수 추가 -- workspaces.ts
+
+     getWorkflowPreview 함수 -- GET /workspaces/:id/workflow-preview
+       반환: WorkflowPreview 또는 null
+     buildWorkflow 함수 -- POST /workspaces/:id/build-workflow
+       반환: BuildWorkflowResponse
+
+23-3. 쿼리 키 추가
+
+     workspaces에 추가:
+       workflowPreview: (id: string) => ['workspaces', id, 'workflow-preview']
+
+23-4. 훅 확장 -- useWorkspaces.ts
+
+     useWorkspaceDetail에 추가:
+       workflowPreviewQuery -- refetchInterval: 3s when isActive, enabled when purpose is WORKFLOW_BUILDER
+       buildWorkflowMutation -- POST build-workflow, 성공 시 /workflows/:workflowId 로 이동
+
+23-5. 프론트엔드 검증 실행
+
+
+----- Phase 24 프론트엔드 -- WorkflowBuilderPage -----
+
+핵심 파일:
+  - flow-front/src/pages/WorkflowBuilderPage.tsx -- 신규
+  - flow-front/src/components/workspace/WorkflowPreviewCanvas.tsx -- 신규
+  - flow-front/src/components/layout/Sidebar.tsx -- 수정
+  - flow-front/src/App.tsx -- 수정
+참조할 코드 -- 읽기만, 수정하지 않음:
+  - flow-front/src/components/workspace/ChatPanel.tsx -- 채팅 패널 재사용
+  - flow-front/src/components/flow/FlowCanvas.tsx -- 캔버스 렌더링 참조
+  - flow-front/src/components/flow/hooks/useFlowLayout.ts -- 레이아웃 엔진 참조
+  - flow-front/src/pages/WorkspaceCreatePage.tsx -- 생성 폼 패턴 참조
+
+24-1. WorkflowPreviewCanvas 컴포넌트 생성
+     파일: flow-front/src/components/workspace/WorkflowPreviewCanvas.tsx
+
+     Props:
+       preview: WorkflowPreview 또는 null
+
+     기능:
+       preview가 null이면 빈 상태 메시지 표시: "에이전트에게 워크플로우를 설계해달라고 요청하세요."
+       preview가 있으면 기존 FlowCanvas를 읽기전용으로 렌더링.
+
+       preview 데이터를 ReactFlow 노드/엣지로 변환:
+         기존 useFlowLayout 훅을 재사용하거나, 유사한 변환 로직을 작성.
+         Start 노드 --> WorkDefinition 노드들 --> End 노드.
+         각 WorkDefinition 노드 아래에 TaskDefinition 노드들.
+         reportFileRefs에 따른 참조 엣지.
+
+       상단에 워크플로우 메타데이터 표시:
+         이름, 설명, 브랜치 전략, seedKeys.
+         Git 레포 목록, MCP 서버 목록.
+
+       하단에 "워크플로우 생성" 버튼:
+         preview가 유효할 때만 활성화.
+         클릭 시 buildWorkflowMutation 호출.
+
+24-2. WorkflowBuilderPage 생성
+     파일: flow-front/src/pages/WorkflowBuilderPage.tsx
+
+     이 페이지는 두 가지 모드를 가진다:
+       생성 모드 -- 빌더 세션을 새로 시작
+       빌더 모드 -- 기존 세션에서 채팅 + 프리뷰
+
+     생성 모드 (URL: /workflow-builder/new):
+       폼:
+         이름 입력 (세션 이름)
+         Git 레포 선택 (baseBranch 입력 포함) -- 에이전트가 코드를 탐색할 프로젝트 선택
+         MCP 서버 선택 (선택사항)
+         모델 선택
+       생성 버튼: createWorkspaceMutation 호출 -- purpose: WORKFLOW_BUILDER
+       성공 시 /workflow-builder/:id 로 이동
+
+     빌더 모드 (URL: /workflow-builder/:id):
+       분할 레이아웃 -- flex row, h-full:
+
+       좌측 (w-[450px] 또는 flex-shrink-0):
+         ChatPanel 재사용 -- workspaceId, isActive 전달
+         하단 인풋에 placeholder: "어떤 워크플로우를 만들고 싶으신가요..."
+
+       우측 (flex-1):
+         WorkflowPreviewCanvas 컴포넌트
+         workflowPreviewQuery.data를 preview props로 전달
+         3초 간격으로 폴링하여 에이전트가 새 정의를 출력할 때마다 자동 갱신
+
+       상단 헤더:
+         세션 이름
+         상태 배지 (ACTIVE 또는 COMPLETED)
+         액션 버튼:
+           워크플로우 생성 버튼 -- preview가 있을 때만 활성화
+           세션 완료 버튼 -- completeMutation
+           세션 삭제 버튼
+
+       워크플로우 생성 성공 시:
+         성공 메시지 표시
+         /workflows/:workflowId 로 이동 (생성된 워크플로우 상세 페이지)
+
+24-3. Sidebar에 네비게이션 추가
+     navItems에 추가 -- Workspaces 다음:
+       { to: '/workflow-builder', label: 'Builder', icon: Wand2 }
+     lucide-react에서 Wand2 아이콘 import.
+     또는 적절한 아이콘: Sparkles, Bot, MessageSquarePlus 등.
+
+24-4. App.tsx에 라우트 추가
+     /workflow-builder -- WorkflowBuilderListPage 또는 빌더 세션 목록
+       기존 WorkspaceListPage를 재사용하되 purpose=WORKFLOW_BUILDER 필터
+       또는 간단하게 WorkspaceListPage에 purpose 필터 props를 추가
+     /workflow-builder/new -- WorkflowBuilderPage (생성 모드)
+     /workflow-builder/:id -- WorkflowBuilderPage (빌더 모드)
+
+     빌더 세션 목록 구현 방안:
+       WorkspaceListPage에 purpose props를 추가하여 WORKFLOW_BUILDER만 필터.
+       또는 별도 WorkflowBuilderListPage를 생성.
+       간단한 접근: WorkspaceListPage를 재사용하고 purpose를 Route element의 props로 전달.
+
+24-5. 프론트엔드 검증 실행
+
+
+----- Phase 25 대화형 빌더 통합 검증 -----
+
+25-1. 백엔드 서버 빌드 후 실행:
+     cd flow-backend && npm run build && npm run start
+
+25-2. 프론트엔드 dev 서버 실행:
+     cd flow-front && npm run dev
+
+25-3. Playwright MCP로 다음 시나리오를 검증:
+
+     시나리오 A -- 빌더 세션 생성:
+       사이드바에서 Builder 메뉴 클릭
+       /workflow-builder 경로로 이동 확인
+       "새 빌더 세션" 버튼 클릭 --> /workflow-builder/new 이동
+       세션 이름 입력, Git 레포 선택, 모델 선택
+       생성 버튼 클릭 --> /workflow-builder/:id 이동
+
+     시나리오 B -- 채팅 + 프리뷰 레이아웃:
+       좌측에 채팅 패널 표시 확인
+       우측에 프리뷰 캔버스 표시 확인 (초기: 빈 상태 메시지)
+
+     시나리오 C -- 에이전트와 대화:
+       채팅 입력란에 "코드 리뷰 후 테스트를 작성하는 워크플로우를 만들어주세요" 입력
+       전송 후 에이전트 응답 대기
+       에이전트가 WORKFLOW_DEFINITION_START 마커가 포함된 응답을 반환하면:
+         우측 캔버스에 워크플로우 프리뷰가 자동으로 나타나는지 확인
+         Work 노드, Task 노드가 올바르게 배치되는지 확인
+
+     시나리오 D -- 프리뷰 갱신:
+       추가 채팅으로 워크플로우 수정 요청: "Work 1에 테스트 실행 Task를 추가해주세요"
+       에이전트 응답 후 캔버스 프리뷰가 갱신되는지 확인
+
+     시나리오 E -- 워크플로우 생성:
+       프리뷰가 표시된 상태에서 "워크플로우 생성" 버튼 클릭
+       성공 시 /workflows/:workflowId 로 이동 확인
+       생성된 워크플로우가 올바른 구조를 가지는지 확인:
+         name, workDefinitions, taskDefinitions 등이 프리뷰와 일치
+
+     시나리오 F -- 빌더 세션 목록:
+       /workflow-builder 페이지에서 기존 빌더 세션 목록 표시 확인
+       일반 워크스페이스(GENERAL)는 표시되지 않는지 확인
+
+25-4. 문제 발견 시 즉시 수정하고 재검증
+
+25-5. 최종 검증:
+     cd flow-backend && npm run typecheck && npm run test && npm run lint
+     cd flow-front && npx tsc -b && npm run lint && npm run build
+
+ALL FEATURES COMPLETE -- GIT SAFETY + WORK LINEAGE + ADHOC WORKSPACE + BRANCH MERGE + SELECTIVE PUSH + CONVERSATIONAL WORKFLOW BUILDER 를 출력한다.

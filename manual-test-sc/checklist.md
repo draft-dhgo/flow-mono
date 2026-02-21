@@ -116,6 +116,68 @@
 - [x] Integration: direct URL access to invalid routes handled — TC-INT-12 PASS
 - [x] Integration: status badge colors match design spec — TC-INT-13 PASS
 
+## Workspace UI
+- [ ] Workspace UI: list page loads correctly (/workspaces) — TC-WS-01
+- [ ] Workspace UI: empty state shows create action — TC-WS-02
+- [ ] Workspace UI: create form loads with all sections — TC-WS-04
+- [ ] Workspace UI: create form validation (disabled on empty) — TC-WS-05
+- [ ] Workspace UI: add/remove git ref rows in form — TC-WS-06, TC-WS-07
+- [ ] Workspace UI: create workspace succeeds → navigates to detail — TC-WS-08
+- [ ] Workspace UI: MCP server checkbox selection — TC-WS-09
+- [ ] Workspace UI: list shows created workspace with correct columns — TC-WS-10
+- [ ] Workspace UI: status filter buttons work — TC-WS-11
+- [ ] Workspace UI: row click navigates to detail — TC-WS-12
+- [ ] Workspace UI: detail header shows name + status badge + info bar — TC-WS-13
+- [ ] Workspace UI: file explorer (tree + editor) — TC-WS-14
+- [ ] Workspace UI: diff view (file list + side-by-side diff) — TC-WS-15
+- [ ] Workspace UI: diff view git selector (multi git ref) — TC-WS-16
+- [ ] Workspace UI: chat panel send message — TC-WS-17
+- [ ] Workspace UI: chat Shift+Enter for newline — TC-WS-18
+- [ ] Workspace UI: chat tool groups expand/collapse — TC-WS-19
+- [ ] Workspace UI: chat disabled when completed — TC-WS-20
+- [ ] Workspace UI: complete workspace → status changes — TC-WS-21
+- [ ] Workspace UI: remote push (completed) → push result dialog — TC-WS-22, TC-WS-23
+- [ ] Workspace UI: delete workspace from detail page — TC-WS-24
+- [ ] Workspace UI: delete workspace from list page — TC-WS-25
+
+## Work Lineage UI
+- [ ] Lineage UI: page loads correctly (/work-lineage) — TC-LIN-01
+- [ ] Lineage UI: empty state message — TC-LIN-02
+- [ ] Lineage UI: entries display with issue key + run count — TC-LIN-03
+- [ ] Lineage UI: expand/collapse entries — TC-LIN-04
+- [ ] Lineage UI: runs table shows correct columns — TC-LIN-05
+- [ ] Lineage UI: checkbox selection for completed runs — TC-LIN-06
+- [ ] Lineage UI: checkbox disabled for non-completed runs — TC-LIN-07
+- [ ] Lineage UI: merge dialog opens with selected count — TC-LIN-08
+- [ ] Lineage UI: merge dialog workspace dropdown (active only) — TC-LIN-09
+- [ ] Lineage UI: merge dialog no active workspaces message — TC-LIN-10
+- [ ] Lineage UI: execute merge — TC-LIN-11
+- [ ] Lineage UI: cancel merge dialog — TC-LIN-12
+- [ ] Lineage UI: copy markdown export — TC-LIN-13
+- [ ] Lineage UI: download markdown export — TC-LIN-14
+
+## Workflow Builder UI
+- [ ] Builder UI: list page loads correctly (/workflow-builder) — TC-BLD-01
+- [ ] Builder UI: empty state shows create action — TC-BLD-02
+- [ ] Builder UI: list only shows WORKFLOW_BUILDER workspaces — TC-BLD-03
+- [ ] Builder UI: create form fields (no branchName) — TC-BLD-05, TC-BLD-06
+- [ ] Builder UI: create form validation — TC-BLD-07
+- [ ] Builder UI: create session → agent auto-starts — TC-BLD-08
+- [ ] Builder UI: session layout (chat + preview split) — TC-BLD-09
+- [ ] Builder UI: agent greeting message — TC-BLD-10
+- [ ] Builder UI: preview empty state — TC-BLD-11
+- [ ] Builder UI: chat to design workflow — TC-BLD-12
+- [ ] Builder UI: preview canvas shows workflow — TC-BLD-13, TC-BLD-14
+- [ ] Builder UI: preview zoom controls — TC-BLD-15
+- [ ] Builder UI: "워크플로우 생성" button appears — TC-BLD-16
+- [ ] Builder UI: build workflow from preview — TC-BLD-17
+- [ ] Builder UI: created workflow matches preview — TC-BLD-18
+- [ ] Builder UI: iterative design (modify via chat) — TC-BLD-20
+- [ ] Builder UI: complete builder session — TC-BLD-21
+- [ ] Builder UI: delete builder session — TC-BLD-22, TC-BLD-23
+- [ ] Builder UI: list filter buttons — TC-BLD-24
+- [ ] Builder UI: row click navigates to detail — TC-BLD-25
+
 ## Bug Summary
 | Bug | Description | Status |
 |-----|-------------|--------|
@@ -130,11 +192,16 @@
 | BUG-009 | Progress shows "Work 2/1" for completed workflow | FIXED |
 | BUG-010 | Work Node edit loses task queries (422 on save) | FIXED |
 
-## Final Summary
-- **Total test cases:** ~100 (Git 10 + MCP 12 + Workflow 18 + Runtime 35+ + Agent 14 + Integration 13)
+## Final Summary (Iteration 1-2)
+- **Total test cases (tested):** ~100 (Git 10 + MCP 12 + Workflow 18 + Runtime 35+ + Agent 14 + Integration 13)
 - **PASS:** 82+
 - **SKIP:** 10 (mostly agent session requiring real Claude agent, checkpoint requiring real execution)
 - **BLOCKED:** 1 (TC-WF-04: Playwright + Radix Select incompatibility — not an app bug)
 - **FAIL:** 0 (all found bugs were fixed and verified)
 - **Bugs found and fixed:** 10 (BUG-001 through BUG-010)
-- **Iteration 2 coverage:** Multi-work sequential execution, work node CRUD during PAUSED state, pause/resume cycles, cancel at various stages, dashboard accuracy with multiple concurrent runs, progress display accuracy
+
+## Pending Tests (Iteration 3)
+- **Workspace UI:** 25 test cases (TC-WS-01 ~ TC-WS-25)
+- **Work Lineage UI:** 14 test cases (TC-LIN-01 ~ TC-LIN-14)
+- **Workflow Builder UI:** 25 test cases (TC-BLD-01 ~ TC-BLD-25)
+- **Total pending:** 64 test cases

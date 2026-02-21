@@ -15,6 +15,7 @@ flow-front/dist/
 
 # Sub-project local data
 flow-backend/workflow-spaces/
+flow-backend/flowflow-data/
 
 # Playwright MCP
 .playwright-mcp/
