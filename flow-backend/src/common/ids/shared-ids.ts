@@ -48,6 +48,9 @@ export const WorkExecutionId = createIdFactory<WorkExecutionId>('WorkExecutionId
 export type UserId = Brand<string, 'UserId'>;
 export const UserId = createIdFactory<UserId>('UserId');
 
+export type WorkspaceId = Brand<string, 'WorkspaceId'>;
+export const WorkspaceId = createIdFactory<WorkspaceId>('WorkspaceId');
+
 // ==================== Re-export Brand Utility ====================
 
 export type { Brand, IdFactory };

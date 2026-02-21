@@ -32,6 +32,7 @@ import { AddWorkNodeUseCase } from '../application/commands/add-work-node-use-ca
 import { RemoveWorkNodeUseCase } from '../application/commands/remove-work-node-use-case.js';
 import { RecoverOrphanedRunsUseCase } from '../application/commands/recover-orphaned-runs-use-case.js';
 import { RestoreToCheckpointUseCase } from '../application/commands/restore-to-checkpoint-use-case.js';
+import { PushBranchesUseCase } from '../application/commands/push-branches-use-case.js';
 import { WorkflowRuntimeFacadeImpl } from '../application/workflow-runtime-facade-impl.js';
 // application - queries
 import { ListWorkflowRunsQuery } from '../application/queries/list-workflow-runs-query.js';
@@ -41,6 +42,8 @@ import { ListCheckpointsQuery } from '../application/queries/list-checkpoints-qu
 import { GetReportQuery } from '../application/queries/get-report-query.js';
 import { GetWorkspaceTreeQuery } from '../application/queries/get-workspace-tree-query.js';
 import { GetWorkspaceFileQuery } from '../application/queries/get-workspace-file-query.js';
+import { GetWorkLineageQuery } from '../application/queries/get-work-lineage-query.js';
+import { ExportWorkLineageQuery } from '../application/queries/export-work-lineage-query.js';
 // event handlers
 import { WorkflowDeletedHandler } from '../application/event-handlers/workflow-deleted-handler.js';
 // events
@@ -51,6 +54,7 @@ import {
 } from '@common/events/index.js';
 import { WorkflowRuntimeController } from './workflow-runtime.controller.js';
 import { ReportController } from './report.controller.js';
+import { WorkLineageController } from './work-lineage.controller.js';
 import { SharedModule } from '@common/presentation/shared.module.js';
 import { WorkflowQueryModule } from '@common/presentation/workflow-query.module.js';
 import { McpModule } from '@mcp/presentation/mcp.module.js';
@@ -96,6 +100,7 @@ import { AgentModule } from '@agent/presentation/agent.module.js';
     RemoveWorkNodeUseCase,
     RecoverOrphanedRunsUseCase,
     RestoreToCheckpointUseCase,
+    PushBranchesUseCase,
     // Queries
     ListWorkflowRunsQuery,
     GetWorkflowRunQuery,
@@ -104,12 +109,14 @@ import { AgentModule } from '@agent/presentation/agent.module.js';
     GetReportQuery,
     GetWorkspaceTreeQuery,
     GetWorkspaceFileQuery,
+    GetWorkLineageQuery,
+    ExportWorkLineageQuery,
     // Facade
     { provide: WorkflowRuntimeFacade, useClass: WorkflowRuntimeFacadeImpl },
     // Event handlers
     WorkflowDeletedHandler,
   ],
-  controllers: [WorkflowRuntimeController, ReportController],
+  controllers: [WorkflowRuntimeController, ReportController, WorkLineageController],
   exports: [
     StartWorkflowRunUseCase,
     PauseWorkflowRunUseCase,
@@ -118,6 +125,7 @@ import { AgentModule } from '@agent/presentation/agent.module.js';
     DeleteWorkflowRunUseCase,
     CheckpointRepository,
     WorkflowRuntimeFacade,
+    WorkTreeRepository,
   ],
 })
 export class WorkflowRuntimeModule implements OnModuleInit {

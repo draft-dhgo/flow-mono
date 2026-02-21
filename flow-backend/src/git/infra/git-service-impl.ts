@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { GitService } from '@common/ports/index.js';
 import type { GitCloneOptions, GitCreateWorktreeOptions } from '@common/ports/index.js';
 import { GitClient } from '../domain/ports/git-client.js';
+import type { GitLogEntry } from '../domain/ports/git-client.js';
 
 @Injectable()
 export class GitServiceImpl extends GitService {
@@ -56,5 +57,45 @@ export class GitServiceImpl extends GitService {
 
   async removeWorktreeForBranch(repoPath: string, branch: string): Promise<void> {
     await this.gitClient.removeWorktreeForBranch(repoPath, branch);
+  }
+
+  async getCurrentBranch(repoPath: string): Promise<string> {
+    return this.gitClient.getCurrentBranch(repoPath);
+  }
+
+  async push(repoPath: string, branch: string): Promise<void> {
+    await this.gitClient.push(repoPath, branch);
+  }
+
+  async installPrePushHook(worktreePath: string): Promise<void> {
+    await this.gitClient.installPrePushHook(worktreePath);
+  }
+
+  async unsetUpstream(repoPath: string, branch: string): Promise<void> {
+    await this.gitClient.unsetUpstream(repoPath, branch);
+  }
+
+  async getCommitCount(repoPath: string, baseBranch: string): Promise<number> {
+    return this.gitClient.getCommitCount(repoPath, baseBranch);
+  }
+
+  async getLog(repoPath: string, baseBranch: string, maxCount: number): Promise<GitLogEntry[]> {
+    return this.gitClient.getLog(repoPath, baseBranch, maxCount);
+  }
+
+  async diff(repoPath: string, baseBranch: string): Promise<string[]> {
+    return this.gitClient.diff(repoPath, baseBranch);
+  }
+
+  async getFileAtRef(repoPath: string, ref: string, filePath: string): Promise<string> {
+    return this.gitClient.getFileAtRef(repoPath, ref, filePath);
+  }
+
+  async merge(repoPath: string, branch: string): Promise<void> {
+    await this.gitClient.merge(repoPath, branch);
+  }
+
+  async createReadOnlyWorktree(repoPath: string, worktreePath: string, ref: string): Promise<void> {
+    await this.gitClient.createReadOnlyWorktree(repoPath, worktreePath, ref);
   }
 }

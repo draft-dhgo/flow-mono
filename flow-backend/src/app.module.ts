@@ -10,6 +10,7 @@ import { McpModule } from './mcp/presentation/mcp.module.js';
 import { AgentModule } from './agent/presentation/agent.module.js';
 import { WorkflowRuntimeModule } from './workflow-runtime/presentation/workflow-runtime.module.js';
 import { McpGatewayModule } from './mcp-gateway/presentation/mcp-gateway.module.js';
+import { WorkspaceModule } from './workspace/presentation/workspace.module.js';
 import { AuthModule } from './auth/presentation/auth.module.js';
 import { JwtAuthGuard } from './auth/presentation/guards/jwt-auth.guard.js';
 
@@ -42,6 +43,7 @@ const featureModules = [
   AgentModule,
   WorkflowRuntimeModule,
   McpGatewayModule,
+  WorkspaceModule,
 ];
 
 function buildTypeOrmModule(): DynamicModule {

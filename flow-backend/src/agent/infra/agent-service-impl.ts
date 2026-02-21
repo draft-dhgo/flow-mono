@@ -3,6 +3,7 @@ import { AgentService } from '@common/ports/index.js';
 import type {
   AgentSessionInfo,
   StartAgentSessionOptions,
+  StartWorkspaceSessionOptions,
   QueryResult,
 } from '@common/ports/index.js';
 import type { WorkExecutionId } from '@common/ids/index.js';
@@ -93,5 +94,52 @@ export class AgentServiceImpl extends AgentService {
       processId: session.processId,
       isAssigned: session.isAssigned,
     };
+  }
+
+  // Workspace session methods — separate map for workspace↔session mapping
+  private readonly workspaceSessions = new Map<string, string>();
+
+  async startSessionForWorkspace(options: StartWorkspaceSessionOptions): Promise<AgentSessionInfo> {
+    const handle = await this.agentClient.start({
+      model: options.model,
+      workspacePath: options.workspacePath,
+      mcpServerConfigs: [...options.mcpServerConfigs],
+      systemPrompt: options.systemPrompt,
+      permissionMode: 'bypassPermissions',
+    });
+
+    this.workspaceSessions.set(options.workspaceId, handle.sessionId);
+
+    // Flush buffered logs from start() with workspaceId as key
+    if (this.agentLogEmitter) {
+      await this.agentLogEmitter.tagAndFlush(handle.sessionId, options.workspaceId);
+    }
+
+    // Set workExecutionId on client so future sendQuery logs are emitted directly
+    if (this.agentClient instanceof ClaudeAgentClient) {
+      this.agentClient.setWorkExecutionId(handle.sessionId, options.workspaceId);
+    }
+
+    return {
+      sessionId: handle.sessionId,
+      processId: handle.processId,
+      isAssigned: true,
+    };
+  }
+
+  async sendQueryForWorkspace(workspaceId: string, query: string): Promise<QueryResult> {
+    const sessionId = this.workspaceSessions.get(workspaceId);
+    if (!sessionId) {
+      throw new Error(`No agent session found for workspace ${workspaceId}`);
+    }
+    return this.agentClient.sendQuery(sessionId, query);
+  }
+
+  async stopSessionForWorkspace(workspaceId: string): Promise<void> {
+    const sessionId = this.workspaceSessions.get(workspaceId);
+    if (sessionId) {
+      await this.agentClient.stop(sessionId);
+      this.workspaceSessions.delete(workspaceId);
+    }
   }
 }

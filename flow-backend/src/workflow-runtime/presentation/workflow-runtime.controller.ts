@@ -9,6 +9,7 @@ import { RestoreToCheckpointUseCase } from '../application/commands/restore-to-c
 import { EditWorkNodeConfigUseCase } from '../application/commands/edit-work-node-config-use-case.js';
 import { AddWorkNodeUseCase } from '../application/commands/add-work-node-use-case.js';
 import { RemoveWorkNodeUseCase } from '../application/commands/remove-work-node-use-case.js';
+import { PushBranchesUseCase } from '../application/commands/push-branches-use-case.js';
 import { ListWorkflowRunsQuery } from '../application/queries/list-workflow-runs-query.js';
 import { GetWorkflowRunQuery } from '../application/queries/get-workflow-run-query.js';
 import { GetWorkflowRunSummaryQuery } from '../application/queries/get-workflow-run-summary-query.js';
@@ -45,6 +46,7 @@ export class WorkflowRuntimeController {
     private readonly listCheckpointsQuery: ListCheckpointsQuery,
     private readonly getWorkspaceTreeQuery: GetWorkspaceTreeQuery,
     private readonly getWorkspaceFileQuery: GetWorkspaceFileQuery,
+    private readonly pushBranchesUseCase: PushBranchesUseCase,
   ) {}
 
   @ApiOperation({ summary: 'Start a new workflow run' })
@@ -150,6 +152,14 @@ export class WorkflowRuntimeController {
     @Query('path') filePath: string,
   ) {
     return this.getWorkspaceFileQuery.execute(id, filePath);
+  }
+
+  @ApiOperation({ summary: 'Push branches of a completed workflow run to remote' })
+  @ApiResponse({ status: 200, description: 'Push results' })
+  @Post(':id/push')
+  @HttpCode(200)
+  async pushBranches(@Param('id', new BrandedIdPipe(WorkflowRunId, 'WorkflowRunId')) id: WorkflowRunId) {
+    return this.pushBranchesUseCase.execute(id);
   }
 
   @ApiOperation({ summary: 'Delete a workflow run' })

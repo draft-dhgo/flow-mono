@@ -32,6 +32,9 @@ function createMocks() {
     deleteSession: vi.fn(),
     sendQuery: vi.fn(),
     findSessionByWorkExecutionId: vi.fn(),
+    startSessionForWorkspace: vi.fn(),
+    sendQueryForWorkspace: vi.fn(),
+    stopSessionForWorkspace: vi.fn(),
   };
   const reportRepository: ReportRepository = {
     findById: vi.fn(),

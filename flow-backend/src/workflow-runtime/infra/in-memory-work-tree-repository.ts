@@ -30,4 +30,8 @@ export class InMemoryWorkTreeRepository extends WorkTreeRepository {
   async exists(id: WorkTreeId): Promise<boolean> {
     return this.store.has(id);
   }
+
+  async findByGitId(gitId: string): Promise<WorkTree[]> {
+    return [...this.store.values()].filter((wt) => String(wt.gitId) === gitId);
+  }
 }

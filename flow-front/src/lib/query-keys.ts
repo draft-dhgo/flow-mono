@@ -23,4 +23,17 @@ export const queryKeys = {
   auth: {
     me: ['auth', 'me'] as const,
   },
+  workspaces: {
+    all: ['workspaces'] as const,
+    detail: (id: string) => ['workspaces', id] as const,
+    tree: (id: string) => ['workspaces', id, 'tree'] as const,
+    file: (id: string, path: string) => ['workspaces', id, 'file', path] as const,
+    diff: (id: string, gitId?: string) => ['workspaces', id, 'diff', gitId ?? 'default'] as const,
+    agentLogs: (id: string) => ['workspaces', id, 'agent-logs'] as const,
+    workflowPreview: (id: string) => ['workspaces', id, 'workflow-preview'] as const,
+  },
+  workLineage: {
+    all: ['work-lineage'] as const,
+    export: ['work-lineage', 'export'] as const,
+  },
 };

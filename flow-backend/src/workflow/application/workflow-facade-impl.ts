@@ -49,6 +49,7 @@ export class WorkflowFacadeImpl implements WorkflowFacade {
       mcpServerRefs: params.mcpServerRefs?.map((r) =>
         McpServerRef.create(McpServerId.create(r.mcpServerId), r.envOverrides),
       ),
+      seedKeys: params.seedKeys ? [...params.seedKeys] : undefined,
     });
   }
 
@@ -91,6 +92,7 @@ export class WorkflowFacadeImpl implements WorkflowFacade {
       wd.gitRefs?.map((r) => GitRef.create(GitId.create(r.gitId), r.baseBranch)),
       wd.mcpServerRefs?.map((r) => McpServerRef.create(McpServerId.create(r.mcpServerId), r.envOverrides)),
       wd.pauseAfter,
+      wd.reportFileRefs ? [...wd.reportFileRefs] : undefined,
     );
   }
 

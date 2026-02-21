@@ -3,6 +3,7 @@ import { AgentService } from '@common/ports/index.js';
 import type {
   AgentSessionInfo,
   StartAgentSessionOptions,
+  StartWorkspaceSessionOptions,
   QueryResult,
 } from '@common/ports/index.js';
 import type { WorkExecutionId } from '@common/ids/index.js';
@@ -37,5 +38,26 @@ export class InMemoryAgentService extends AgentService {
 
   async findSessionByWorkExecutionId(workExecutionId: WorkExecutionId): Promise<AgentSessionInfo | null> {
     return this.sessions.get(workExecutionId) ?? null;
+  }
+
+  async startSessionForWorkspace(options: StartWorkspaceSessionOptions): Promise<AgentSessionInfo> {
+    const sessionInfo: AgentSessionInfo = {
+      sessionId: uuidv4(),
+      processId: uuidv4(),
+      isAssigned: true,
+    };
+    this.sessions.set(options.workspaceId, sessionInfo);
+    return sessionInfo;
+  }
+
+  async sendQueryForWorkspace(workspaceId: string, query: string): Promise<QueryResult> {
+    return {
+      response: `Mock response for workspace query: ${query}`,
+      tokensUsed: query.length,
+    };
+  }
+
+  async stopSessionForWorkspace(workspaceId: string): Promise<void> {
+    this.sessions.delete(workspaceId);
   }
 }

@@ -4,7 +4,7 @@ import * as path from 'node:path';
 
 const SRC_ROOT = path.resolve(__dirname, '../../src');
 
-const FEATURES = ['workflow', 'workflow-runtime', 'git', 'mcp', 'agent'] as const;
+const FEATURES = ['workflow', 'workflow-runtime', 'git', 'mcp', 'agent', 'workspace'] as const;
 const FEATURE_ALIASES = FEATURES.map((f) => `@${f}/`);
 
 // ── helpers ──────────────────────────────────────────────────────────
@@ -319,6 +319,7 @@ describe('Architecture Rules', () => {
       'git': [],
       'mcp': [],
       'agent': [],
+      'workspace': ['workflow-runtime', 'workflow', 'git', 'mcp', 'agent'],
     };
 
     it('presentation/*.module.ts의 feature import가 허용된 의존 관계를 따른다', () => {

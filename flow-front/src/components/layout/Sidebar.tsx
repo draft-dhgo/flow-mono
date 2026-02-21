@@ -1,11 +1,14 @@
 import { NavLink } from 'react-router-dom';
-import { LayoutDashboard, GitBranch, Server, Workflow, ListChecks, LogOut, User } from 'lucide-react';
+import { LayoutDashboard, GitBranch, Server, Workflow, ListChecks, Network, FolderOpen, LogOut, User, Wand2 } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
 import { Button } from '@/components/ui/button';
 
 const navItems = [
   { to: '/', label: 'Dashboard', icon: LayoutDashboard },
   { to: '/workflow-runs', label: 'Runs', icon: ListChecks },
+  { to: '/work-lineage', label: 'Lineage', icon: Network },
+  { to: '/workspaces', label: 'Workspaces', icon: FolderOpen },
+  { to: '/workflow-builder', label: 'Builder', icon: Wand2 },
   { to: '/workflows', label: 'Workflows', icon: Workflow },
   { to: '/gits', label: 'Git', icon: GitBranch },
   { to: '/mcp-servers', label: 'MCP Servers', icon: Server },

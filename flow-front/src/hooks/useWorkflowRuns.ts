@@ -168,6 +168,13 @@ export function useWorkflowRunDetail(id: string) {
     },
   });
 
+  const pushMutation = useMutation({
+    mutationFn: () => workflowRunsApi.pushBranches(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.workflowRuns.detail(id) });
+    },
+  });
+
   return {
     detailQuery,
     checkpointsQuery,
@@ -180,5 +187,6 @@ export function useWorkflowRunDetail(id: string) {
     addWorkNodeMutation,
     deleteWorkNodeMutation,
     startNewRunMutation,
+    pushMutation,
   };
 }

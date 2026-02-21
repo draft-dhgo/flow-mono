@@ -49,6 +49,6 @@ import { SharedModule } from '@common/presentation/shared.module.js';
     ListAgentLogsQuery,
   ],
   controllers: [AgentController, AgentLogController],
-  exports: [AgentService, AgentSessionRepository, StartAgentSessionUseCase, SendAgentQueryUseCase, StopAgentSessionUseCase],
+  exports: [AgentService, AgentSessionRepository, StartAgentSessionUseCase, SendAgentQueryUseCase, StopAgentSessionUseCase, ListAgentLogsQuery],
 })
 export class AgentModule {}

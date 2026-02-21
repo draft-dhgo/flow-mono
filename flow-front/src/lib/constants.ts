@@ -1,4 +1,4 @@
-import type { WorkflowRunStatus, WorkflowStatus } from '@/api/types';
+import type { WorkflowRunStatus, WorkflowStatus, WorkspaceStatus } from '@/api/types';
 
 export const RUN_STATUS_COLOR: Record<WorkflowRunStatus, string> = {
   INITIALIZED: 'bg-gray-100 text-gray-800',
@@ -26,6 +26,16 @@ export const RUN_STATUS_LABEL: Record<WorkflowRunStatus, string> = {
 export const WORKFLOW_STATUS_LABEL: Record<WorkflowStatus, string> = {
   DRAFT: '초안',
   ACTIVE: '활성',
+};
+
+export const WORKSPACE_STATUS_COLOR: Record<WorkspaceStatus, string> = {
+  ACTIVE: 'bg-green-100 text-green-800',
+  COMPLETED: 'bg-blue-100 text-blue-800',
+};
+
+export const WORKSPACE_STATUS_LABEL: Record<WorkspaceStatus, string> = {
+  ACTIVE: '활성',
+  COMPLETED: '완료',
 };
 
 export const MODEL_OPTIONS = [

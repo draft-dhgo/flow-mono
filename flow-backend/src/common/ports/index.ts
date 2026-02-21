@@ -12,11 +12,12 @@ export { AgentService } from './agent-service.js';
 export type {
   AgentSessionInfo,
   StartAgentSessionOptions,
+  StartWorkspaceSessionOptions,
   McpServerConfig,
   QueryResult,
 } from './agent-service.js';
 export { GitService } from './git-service.js';
-export type { GitCloneOptions, GitCreateWorktreeOptions } from './git-service.js';
+export type { GitCloneOptions, GitCreateWorktreeOptions, GitLogEntry } from './git-service.js';
 export { McpServerReader } from './mcp-server-reader.js';
 export type { McpServerInfo } from './mcp-server-reader.js';
 export { GitReferenceChecker } from './git-reference-checker.js';
@@ -48,3 +49,4 @@ export { GitFacade } from './git-facade.js';
 export type { RegisterGitParams, RegisterGitResult } from './git-facade.js';
 export { McpServerFacade } from './mcp-server-facade.js';
 export type { RegisterMcpServerParams, RegisterMcpServerResult } from './mcp-server-facade.js';
+export { WorkTreeRepository } from './work-tree-repository.js';

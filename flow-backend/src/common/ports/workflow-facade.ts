@@ -23,6 +23,7 @@ export interface WorkDefinitionInput {
   readonly gitRefs?: ReadonlyArray<GitRefInput>;
   readonly mcpServerRefs?: ReadonlyArray<McpServerRefInput>;
   readonly pauseAfter?: boolean;
+  readonly reportFileRefs?: readonly number[];
 }
 
 export interface CreateWorkflowParams {
@@ -32,6 +33,7 @@ export interface CreateWorkflowParams {
   readonly workDefinitions: ReadonlyArray<WorkDefinitionInput>;
   readonly gitRefs: ReadonlyArray<GitRefInput>;
   readonly mcpServerRefs?: ReadonlyArray<McpServerRefInput>;
+  readonly seedKeys?: readonly string[];
 }
 
 export interface CreateWorkflowResult {

@@ -15,7 +15,9 @@ import { useWorkflowRunDetail } from '@/hooks/useWorkflowRuns';
 import { Button } from '@/components/ui/button';
 import { IssueKeyDialog } from '@/components/IssueKeyDialog';
 import { WorkspaceViewerPanel } from '@/components/flow/panels/WorkspaceViewerPanel';
-import { Plus, RotateCcw, Code } from 'lucide-react';
+import { PushResultDialog } from '@/components/PushResultDialog';
+import { ConfirmDialog } from '@/components/ConfirmDialog';
+import { Plus, RotateCcw, Code, Upload } from 'lucide-react';
 import type { WorkflowRunDetailResponse } from '@/api/types';
 
 type SelectedPanel =
@@ -39,6 +41,8 @@ export function WorkflowRunFlowPage() {
   const [selectedPanel, setSelectedPanel] = useState<SelectedPanel>({ type: 'overview' });
   const [autoResume, setAutoResume] = useState(false);
   const [showRerunDialog, setShowRerunDialog] = useState(false);
+  const [pushConfirmOpen, setPushConfirmOpen] = useState(false);
+  const [pushResultOpen, setPushResultOpen] = useState(false);
 
   const {
     detailQuery,
@@ -52,6 +56,7 @@ export function WorkflowRunFlowPage() {
     addWorkNodeMutation,
     deleteWorkNodeMutation,
     startNewRunMutation,
+    pushMutation,
   } = useWorkflowRunDetail(id!);
 
   const runDetail = detailQuery.data;
@@ -162,6 +167,16 @@ export function WorkflowRunFlowPage() {
                   <Code className="mr-1 h-4 w-4" />
                   파일 탐색
                 </Button>
+                {runDetail.status === 'COMPLETED' && (
+                  <Button
+                    size="sm"
+                    onClick={() => setPushConfirmOpen(true)}
+                    disabled={pushMutation.isPending}
+                  >
+                    <Upload className="mr-1 h-4 w-4" />
+                    원격 푸시
+                  </Button>
+                )}
                 <Button
                   variant="outline"
                   size="sm"
@@ -299,6 +314,28 @@ export function WorkflowRunFlowPage() {
         </div>
         )}
       </div>
+
+      <ConfirmDialog
+        open={pushConfirmOpen}
+        onOpenChange={setPushConfirmOpen}
+        title="원격 푸시"
+        description="로컬 브랜치를 원격 저장소로 푸시합니다. 계속하시겠습니까?"
+        confirmLabel="푸시"
+        onConfirm={() => {
+          pushMutation.mutate(undefined, {
+            onSuccess: () => {
+              setPushConfirmOpen(false);
+              setPushResultOpen(true);
+            },
+          });
+        }}
+        loading={pushMutation.isPending}
+      />
+      <PushResultDialog
+        open={pushResultOpen}
+        onClose={() => setPushResultOpen(false)}
+        results={pushMutation.data?.results ?? null}
+      />
 
       <IssueKeyDialog
         open={showRerunDialog}

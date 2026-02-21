@@ -141,6 +141,11 @@ export class StartWorkflowRunUseCase {
             newBranchName: resolvedBranchName,
           });
 
+          // 에이전트의 원격 푸시 차단
+          await this.gitService.installPrePushHook(workTreePath);
+          // upstream 트래킹 해제 — 새 브랜치가 원격 베이스를 추적하지 않도록
+          await this.gitService.unsetUpstream(workTreePath, resolvedBranchName);
+
           const workTree = WorkTree.create({
             gitId: gitRef.gitId,
             workflowRunId: run.id,

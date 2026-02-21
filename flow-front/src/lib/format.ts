@@ -1,5 +1,5 @@
-import { RUN_STATUS_LABEL, WORKFLOW_STATUS_LABEL } from './constants';
-import type { WorkflowRunStatus, WorkflowStatus } from '@/api/types';
+import { RUN_STATUS_LABEL, WORKFLOW_STATUS_LABEL, WORKSPACE_STATUS_LABEL } from './constants';
+import type { WorkflowRunStatus, WorkflowStatus, WorkspaceStatus } from '@/api/types';
 
 export function formatDate(iso: string): string {
   const d = new Date(iso);
@@ -18,4 +18,8 @@ export function formatRunStatus(status: WorkflowRunStatus): string {
 
 export function formatWorkflowStatus(status: WorkflowStatus): string {
   return WORKFLOW_STATUS_LABEL[status] ?? status;
+}
+
+export function formatWorkspaceStatus(status: WorkspaceStatus): string {
+  return WORKSPACE_STATUS_LABEL[status] ?? status;
 }

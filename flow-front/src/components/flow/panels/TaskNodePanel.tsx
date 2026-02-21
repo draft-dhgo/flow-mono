@@ -37,7 +37,7 @@ export function TaskNodePanel({ form, workIndex, taskIndex, onDeleteTask }: Task
           {...form.register(`workDefinitions.${workIndex}.taskDefinitions.${taskIndex}.query`)}
           rows={4}
         />
-        {(form.formState.errors.workDefinitions as Record<string, unknown>)?.[workIndex]?.taskDefinitions?.[taskIndex]?.query && (
+        {!!(form.formState.errors.workDefinitions as Record<string, Record<string, Record<string, Record<string, unknown>>>>)?.[workIndex]?.taskDefinitions?.[taskIndex]?.query && (
           <p className="text-sm text-red-500 mt-1">쿼리는 필수입니다</p>
         )}
       </div>

@@ -61,4 +61,9 @@ export class WorkTreeTypeormRepository extends WorkTreeRepository {
     const count = await this.repo.countBy({ id: id as string });
     return count > 0;
   }
+
+  async findByGitId(gitId: string): Promise<WorkTree[]> {
+    const rows = await this.repo.findBy({ git_id: gitId });
+    return rows.map((row) => this.toDomain(row));
+  }
 }

@@ -5,7 +5,7 @@
 #         ./reserve.sh 0 10     (10분 후 실행)
 #         ./reserve.sh           (기본값: 10분 후 실행)
 
-PROMPT_FILE="loop-save/backend-evaluation-improvements-prompt.txt"
+PROMPT_FILE="loop-save/execution-ux-improvement-prompt.txt"
 
 HOURS=${1:-0}
 MINUTES=${2:-10}

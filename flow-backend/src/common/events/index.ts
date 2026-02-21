@@ -30,3 +30,4 @@ export { QueryResponded } from './task-execution-events.js';
 export { ReportCompleted, ReportFailed } from './report-events.js';
 export { CheckpointCreated } from './checkpoint-events.js';
 export { AgentSessionStarted, AgentSessionStopped } from './agent-events.js';
+export { WorkspaceCreated, WorkspaceCompleted } from './workspace-events.js';

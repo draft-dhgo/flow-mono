@@ -8,4 +8,5 @@ export abstract class WorkTreeRepository {
   abstract delete(id: WorkTreeId): Promise<void>;
   abstract deleteByWorkflowRunId(workflowRunId: WorkflowRunId): Promise<void>;
   abstract exists(id: WorkTreeId): Promise<boolean>;
+  abstract findByGitId(gitId: string): Promise<WorkTree[]>;
 }

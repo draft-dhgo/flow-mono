@@ -23,6 +23,7 @@ export default defineConfig({
       '@mcp': path.resolve(__dirname, './src/mcp'),
       '@agent': path.resolve(__dirname, './src/agent'),
       '@auth': path.resolve(__dirname, './src/auth'),
+      '@workspace': path.resolve(__dirname, './src/workspace'),
       '@tests': path.resolve(__dirname, './tests'),
     },
   },

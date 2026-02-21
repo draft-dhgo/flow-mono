@@ -106,7 +106,7 @@ export interface CreateWorkflowRequest {
   name: string;
   description?: string;
   branchStrategy: string;
-  gitRefs: GitRefInput[];
+  gitRefs?: GitRefInput[];
   mcpServerRefs?: McpServerRefInput[];
   workDefinitions: WorkDefinitionInput[];
   seedKeys?: string[];
@@ -290,6 +290,60 @@ export interface AgentLogEntryResponse {
 
 // ─── Workspace ───
 
+export type WorkspaceStatus = 'ACTIVE' | 'COMPLETED';
+
+export interface WorkspaceGitRefResponse {
+  gitId: string;
+  gitUrl: string;
+  baseBranch: string;
+  branchName: string;
+}
+
+export interface WorkspaceDetailResponse {
+  id: string;
+  name: string;
+  status: WorkspaceStatus;
+  model: string;
+  path: string;
+  purpose: string;
+  agentSessionId: string | null;
+  createdAt: string;
+  gitRefs: WorkspaceGitRefResponse[];
+  mcpServerRefs: { mcpServerId: string; envOverrides: Record<string, string> }[];
+}
+
+export interface WorkspaceListItem {
+  id: string;
+  name: string;
+  status: WorkspaceStatus;
+  model: string;
+  purpose: string;
+  gitRefCount: number;
+  createdAt: string;
+}
+
+export interface CreateWorkspaceRequest {
+  name: string;
+  model: string;
+  gitRefs: { gitId: string; baseBranch: string; branchName: string }[];
+  mcpServerRefs?: { mcpServerId: string; envOverrides?: Record<string, string> }[];
+  purpose?: 'GENERAL' | 'WORKFLOW_BUILDER';
+}
+
+export interface SendChatMessageRequest {
+  message: string;
+}
+
+export interface ChatMessageResponse {
+  response: string;
+}
+
+export interface DiffFileInfo {
+  path: string;
+  original: string;
+  modified: string;
+}
+
 export interface FileTreeEntry {
   path: string;
   isDirectory: boolean;
@@ -333,4 +387,79 @@ export interface RefreshTokenRequest {
 export interface RefreshTokenResponse {
   accessToken: string;
   refreshToken: string;
+}
+
+// ─── Push ───
+
+export interface PushResult {
+  gitId: string;
+  branch: string;
+  success: boolean;
+  error: string | null;
+}
+
+export interface PushBranchesResult {
+  results: PushResult[];
+}
+
+// ─── Merge ───
+
+export interface MergeBranchesRequest {
+  workflowRunIds: string[];
+}
+
+export interface MergeBranchesResponse {
+  response: string;
+}
+
+// ─── Work Lineage ───
+
+export interface WorkLineageRepoInfo {
+  gitId: string;
+  gitUrl: string;
+  branch: string;
+  commitHash: string;
+  commitCount: number;
+}
+
+export interface WorkLineageRunInfo {
+  workflowRunId: string;
+  workflowName: string;
+  runStatus: string;
+  repos: WorkLineageRepoInfo[];
+}
+
+export interface WorkLineageEntry {
+  issueKey: string;
+  runs: WorkLineageRunInfo[];
+}
+
+// ─── Workflow Builder ───
+
+export interface TaskDefinitionPreview {
+  order: number;
+  query: string;
+  reportOutline: { sections: { title: string; description: string }[] } | null;
+}
+
+export interface WorkDefinitionPreview {
+  order: number;
+  model: string;
+  pauseAfter: boolean;
+  reportFileRefs: number[];
+  taskDefinitions: TaskDefinitionPreview[];
+}
+
+export interface WorkflowPreview {
+  name: string;
+  description: string;
+  branchStrategy: string;
+  gitRefs: { gitId: string; baseBranch: string }[];
+  mcpServerRefs: { mcpServerId: string; envOverrides: Record<string, string> }[];
+  seedKeys: string[];
+  workDefinitions: WorkDefinitionPreview[];
+}
+
+export interface BuildWorkflowResponse {
+  workflowId: string;
 }

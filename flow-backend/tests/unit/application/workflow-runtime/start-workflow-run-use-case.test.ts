@@ -75,11 +75,20 @@ function createMocks() {
     deleteWorktree: vi.fn(),
     deleteRepo: vi.fn(),
     getCurrentCommit: vi.fn(),
+    getCurrentBranch: vi.fn<() => Promise<string>>().mockResolvedValue('main'),
     reset: vi.fn(),
     branchExists: vi.fn<() => Promise<boolean>>().mockResolvedValue(false),
     deleteBranch: vi.fn(),
     fetch: vi.fn(),
     removeWorktreeForBranch: vi.fn(),
+    push: vi.fn(),
+    installPrePushHook: vi.fn(),
+    unsetUpstream: vi.fn(),
+    getCommitCount: vi.fn<() => Promise<number>>().mockResolvedValue(0),
+    getLog: vi.fn().mockResolvedValue([]),
+    diff: vi.fn().mockResolvedValue([]),
+    getFileAtRef: vi.fn<() => Promise<string>>().mockResolvedValue(''),
+    merge: vi.fn(),
   };
   const workspacePathFactory = new WorkspacePathFactory('/tmp/test-spaces');
   return {

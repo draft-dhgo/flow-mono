@@ -1,5 +1,5 @@
 import { GitService } from '@common/ports/index.js';
-import type { GitCloneOptions, GitCreateWorktreeOptions } from '@common/ports/index.js';
+import type { GitCloneOptions, GitCreateWorktreeOptions, GitLogEntry } from '@common/ports/index.js';
 
 export class InMemoryGitService extends GitService {
   private readonly repos = new Map<string, { url: string; branch?: string }>();
@@ -44,6 +44,46 @@ export class InMemoryGitService extends GitService {
   }
 
   async removeWorktreeForBranch(_repoPath: string, _branch: string): Promise<void> {
+    // no-op for in-memory
+  }
+
+  async getCurrentBranch(_repoPath: string): Promise<string> {
+    return 'main';
+  }
+
+  async push(_repoPath: string, _branch: string): Promise<void> {
+    // no-op for in-memory
+  }
+
+  async installPrePushHook(_worktreePath: string): Promise<void> {
+    // no-op for in-memory
+  }
+
+  async unsetUpstream(_repoPath: string, _branch: string): Promise<void> {
+    // no-op for in-memory
+  }
+
+  async getCommitCount(_repoPath: string, _baseBranch: string): Promise<number> {
+    return 0;
+  }
+
+  async getLog(_repoPath: string, _baseBranch: string, _maxCount: number): Promise<GitLogEntry[]> {
+    return [];
+  }
+
+  async diff(_repoPath: string, _baseBranch: string): Promise<string[]> {
+    return [];
+  }
+
+  async getFileAtRef(_repoPath: string, _ref: string, _filePath: string): Promise<string> {
+    return '';
+  }
+
+  async merge(_repoPath: string, _branch: string): Promise<void> {
+    // no-op for in-memory
+  }
+
+  async createReadOnlyWorktree(_repoPath: string, _worktreePath: string, _ref: string): Promise<void> {
     // no-op for in-memory
   }
 }

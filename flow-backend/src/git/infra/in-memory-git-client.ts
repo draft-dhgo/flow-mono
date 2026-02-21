@@ -1,6 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import { GitClient } from '../domain/ports/git-client.js';
-import type { GitCloneOptions, GitWorktreeOptions } from '../domain/ports/git-client.js';
+import type { GitCloneOptions, GitLogEntry, GitWorktreeOptions } from '../domain/ports/git-client.js';
 
 export class InMemoryGitClient extends GitClient {
   private readonly repos = new Map<string, { url: string; branch: string; commits: string[] }>();
@@ -121,6 +121,42 @@ export class InMemoryGitClient extends GitClient {
   }
 
   async removeWorktreeForBranch(_repoPath: string, _branch: string): Promise<void> {
+    // no-op for in-memory
+  }
+
+  async push(_repoPath: string, _branch: string): Promise<void> {
+    // no-op for in-memory
+  }
+
+  async installPrePushHook(_worktreePath: string): Promise<void> {
+    // no-op for in-memory
+  }
+
+  async unsetUpstream(_repoPath: string, _branch: string): Promise<void> {
+    // no-op for in-memory
+  }
+
+  async getCommitCount(_repoPath: string, _baseBranch: string): Promise<number> {
+    return 0;
+  }
+
+  async getLog(_repoPath: string, _baseBranch: string, _maxCount: number): Promise<GitLogEntry[]> {
+    return [];
+  }
+
+  async diff(_repoPath: string, _baseBranch: string): Promise<string[]> {
+    return [];
+  }
+
+  async getFileAtRef(_repoPath: string, _ref: string, _filePath: string): Promise<string> {
+    return '';
+  }
+
+  async merge(_repoPath: string, _branch: string): Promise<void> {
+    // no-op for in-memory
+  }
+
+  async createReadOnlyWorktree(_repoPath: string, _worktreePath: string, _ref: string): Promise<void> {
     // no-op for in-memory
   }
 }

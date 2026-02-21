@@ -12,6 +12,12 @@ import { McpServerManagementPage } from '@/pages/McpServerManagementPage';
 import { WorkflowFlowEditorPage } from '@/pages/WorkflowFlowEditorPage';
 import { WorkflowRunFlowPage } from '@/pages/WorkflowRunFlowPage';
 import { WorkflowRunListPage } from '@/pages/WorkflowRunListPage';
+import { WorkLineagePage } from '@/pages/WorkLineagePage';
+import { WorkspaceListPage } from '@/pages/WorkspaceListPage';
+import { WorkspaceCreatePage } from '@/pages/WorkspaceCreatePage';
+import { WorkspaceDetailPage } from '@/pages/WorkspaceDetailPage';
+import { WorkflowBuilderListPage } from '@/pages/WorkflowBuilderListPage';
+import { WorkflowBuilderPage } from '@/pages/WorkflowBuilderPage';
 
 export default function App() {
   return (
@@ -35,6 +41,13 @@ export default function App() {
                   <Route path="/mcp-servers" element={<McpServerManagementPage />} />
                   <Route path="/workflow-runs" element={<WorkflowRunListPage />} />
                   <Route path="/workflow-runs/:id" element={<WorkflowRunFlowPage />} />
+                  <Route path="/workspaces" element={<WorkspaceListPage />} />
+                  <Route path="/workspaces/new" element={<WorkspaceCreatePage />} />
+                  <Route path="/workspaces/:id" element={<WorkspaceDetailPage />} />
+                  <Route path="/workflow-builder" element={<WorkflowBuilderListPage />} />
+                  <Route path="/workflow-builder/new" element={<WorkflowBuilderPage />} />
+                  <Route path="/workflow-builder/:id" element={<WorkflowBuilderPage />} />
+                  <Route path="/work-lineage" element={<WorkLineagePage />} />
                 </Route>
               </Route>
             </Routes>

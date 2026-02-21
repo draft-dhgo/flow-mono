@@ -24,7 +24,8 @@
       "@mcp/*": ["src/mcp/*"],
       "@agent/*": ["src/agent/*"],
       "@mcp-gateway/*": ["src/mcp-gateway/*"],
-      "@auth/*": ["src/auth/*"]
+      "@auth/*": ["src/auth/*"],
+      "@workspace/*": ["src/workspace/*"]
     }
   },
   "include": ["src/**/*"],

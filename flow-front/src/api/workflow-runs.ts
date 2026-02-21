@@ -10,6 +10,7 @@ import type {
   AgentLogEntryResponse,
   FileTreeEntry,
   WorkspaceFileContent,
+  PushBranchesResult,
 } from './types';
 
 export const workflowRunsApi = {
@@ -49,6 +50,8 @@ export const workflowRunsApi = {
     apiClient.get<unknown, WorkspaceFileContent>(`/workflow-runs/${id}/workspace/file`, {
       params: { path: filePath },
     }),
+  pushBranches: (id: string) =>
+    apiClient.post<unknown, PushBranchesResult>(`/workflow-runs/${id}/push`),
 };
 
 export const reportsApi = {
